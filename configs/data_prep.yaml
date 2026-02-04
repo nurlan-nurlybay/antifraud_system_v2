@@ -1,0 +1,15 @@
+paths:
+  raw_csv: data/creditcard.csv
+  processed_dir: data_processed
+  models_dir: models
+  reports_dir: reports
+
+data:
+  test_size: 0.15
+  val_size: 0.15
+  target_col: Class
+  time_col: Time
+  amount_col: Amount
+
+features:
+  standardize_time_days: true  # z-score(Time/86400)

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fd"
+version = "0.2.0"
+description = "Fraud Detection System v2 (PyTorch Hybrid)"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",           # Deep Learning
+    "pandas",          # Data Manipulation
+    "numpy",           # Math
+    "scikit-learn",    # Trees & Metrics
+    "pyyaml",          # Config management
+    "tqdm",            # Progress bars
+    "optuna",          # Hyperparameter Optimization
+    "mlflow",          # Experiment Tracking
+    "matplotlib",      # Visualization
+    "seaborn",         # Visualization
+    "fastapi",         # Deployment (API)
+    "uvicorn",         # Deployment (Server)
+    "pydantic"         # Data Validation
+]

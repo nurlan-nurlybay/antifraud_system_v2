@@ -1,2 +1,9 @@
 # antifraud_system_v2
-PyTorch [MLP, VAE, LTSM]
+
+## Data prep
+
+run
+
+```bash
+python -m data.data_download
+```
