@@ -1,15 +1,82 @@
 paths:
-  raw_csv: data/creditcard.csv
-  processed_dir: data_processed
-  models_dir: models
-  reports_dir: reports
+  train_transaction: "data/raw/train_transaction.csv"
+  train_identity: "data/raw/train_identity.csv"
+  processed_dir: "data/processed"
 
 data:
-  test_size: 0.15
-  val_size: 0.15
-  target_col: Class
-  time_col: Time
-  amount_col: Amount
+  # Chronological Blending: 60% L0, 20% L1, 20% Test
+  val_size: 0.20
+  test_size: 0.20
+  target_col: "isFraud"
+  time_col: "TransactionDT"
+  amount_col: "TransactionAmt"
+  sequence_length: 5 
 
 features:
-  standardize_time_days: true  # z-score(Time/86400)
+  # Discarded based on Enhanced Data Intel (High Null + Low Correlation)
+  drop_features:
+    - "id_24"
+
+  # Used for grouping LSTM sequences. Dropped before the final .npz save.
+  uid_columns: 
+    - "card1"
+    - "card2"
+    - "card3"
+    - "card4"
+    - "card5"
+    - "card6"
+    - "addr1"
+    - "P_emaildomain"
+
+  categorical:
+    target_encoding:
+      enabled: true
+      k: 5
+      m: 10
+    frequency_encoding:
+      enabled: true
+    
+    # Final list based on cardinality report
+    columns:
+      - "ProductCD"
+      - "card4"
+      - "card6"
+      - "P_emaildomain"
+      - "R_emaildomain"
+      - "addr1"
+      - "addr2"
+      - "DeviceType"
+      - "DeviceInfo"
+      - "id_30"
+      - "id_31"
+      - "id_33"
+      - "id_34"
+      - "id_13"
+      - "id_12"
+      - "id_15"
+      - "id_16"
+      - "id_35"
+      - "id_36"
+      - "id_37"
+      - "id_38"
+      - "M1"
+      - "M2"
+      - "M3"
+      - "M4"
+      - "M5"
+      - "M6"
+      - "M7"
+      - "M8"
+      - "M9"
+
+  # Structural Engineering
+  reduce_v_features: true
+  v_features_pca_dims: 30
+  impute_numerics: "median"
+  impute_categoricals: "Unknown"
+  log_transform_amount: true
+
+metadata:
+  project_version: "v2.2"
+  dataset: "IEEE-CIS"
+  strategy: "Hybrid Ensemble with Chronological Blending"

@@ -1,0 +1,18 @@
+model:
+  name: "FraudMLP"
+  type: "pytorch"
+  # Input dim is usually 30 (V1-V28 + Time + Amount)
+  input_dim: 30
+  hidden_dims: [64, 32]
+  dropout: 0.3
+  activation: "relu"
+  use_batchnorm: true
+
+training:
+  batch_size: 256
+  epochs: 20
+  learning_rate: 0.001
+  weight_decay: 1e-5
+  # Weighted loss for class imbalance (Fraud is class 1)
+  pos_weight: 10.0 
+  early_stopping_patience: 5

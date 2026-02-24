@@ -1,0 +1,60 @@
+=== MISSING DATA & CORRELATION ANALYSIS ===
+
+TOP 30 FEATURES WITH MOST MISSING DATA:
+Feature  Unique  Null_%  Correlation Discard
+  id_24      12   99.20       0.0019     YES
+  id_08      94   99.13       0.0575      NO
+  id_21     490   99.13       0.0635      NO
+  id_07      84   99.13       0.0848      NO
+  id_25     341   99.13       0.0340      NO
+  id_26      95   99.13       0.0996      NO
+  id_27       2   99.12       0.0000     YES
+  id_23       3   99.12       0.0000     YES
+  id_22      25   99.12       0.1184      NO
+  dist2    1751   93.63       0.0191      NO
+     D7     597   93.41       0.1272      NO
+  id_18      18   92.36       0.0500      NO
+    D13     577   89.51       0.0594      NO
+    D14     802   89.47       0.0087      NO
+    D12     635   89.04       0.0289      NO
+  id_03      24   88.77       0.0415      NO
+  id_04      15   88.77       0.0597      NO
+     D6     829   87.61       0.0572      NO
+  id_33     260   87.59       0.0000      NO
+     D8   12353   87.31       0.1426      NO
+  id_09      46   87.31       0.0294      NO
+  id_10      62   87.31       0.0110      NO
+     D9      24   87.31       0.0443      NO
+  id_30      75   86.87       0.0000      NO
+  id_32       4   86.86       0.0697      NO
+  id_34       4   86.82       0.0000      NO
+  id_14      25   86.45       0.0573      NO
+   V165    2547   86.12       0.0514      NO
+   V164    1978   86.12       0.0274      NO
+   V157      25   86.12       0.2349      NO
+
+--------------------------------------------------
+CATEGORICAL FEATURES (Correlation is N/A):
+      Feature  Unique  Null_%  Correlation Discard
+        id_23       3   99.12          0.0     YES
+        id_27       2   99.12          0.0     YES
+        id_33     260   87.59          0.0      NO
+        id_30      75   86.87          0.0      NO
+        id_34       4   86.82          0.0      NO
+   DeviceInfo    1786   79.91          0.0      NO
+        id_16       2   78.10          0.0      NO
+R_emaildomain      60   76.75          0.0      NO
+        id_31     130   76.25          0.0      NO
+   DeviceType       2   76.16          0.0      NO
+        id_35       2   76.13          0.0      NO
+        id_38       2   76.13          0.0      NO
+        id_29       2   76.13          0.0      NO
+        id_15       3   76.13          0.0      NO
+        id_28       2   76.13          0.0      NO
+        id_36       2   76.13          0.0      NO
+        id_37       2   76.13          0.0      NO
+        id_12       2   75.58          0.0      NO
+           M5       2   59.35          0.0      NO
+           M7       2   58.64          0.0      NO
+
+# nvm 0 correlation, these are just not numerical yet (not target encoded)

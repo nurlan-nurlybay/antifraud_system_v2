@@ -1,0 +1,14 @@
+model:
+  name: "FraudVAE"
+  type: "pytorch"
+  input_dim: 30
+  # Compresses 30 features down to a latent vector of size 8
+  latent_dim: 8
+  hidden_dims: [24, 16] 
+
+training:
+  batch_size: 512
+  epochs: 30
+  learning_rate: 0.0005
+  # Weight for KL-Divergence term (beta-VAE)
+  kld_weight: 0.01

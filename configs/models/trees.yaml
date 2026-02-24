@@ -1,0 +1,31 @@
+xgboost:
+  enabled: true
+  params:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    # Important: We want leaf indices for the meta-model
+    pred_leaf: true 
+
+lightgbm:
+  enabled: true
+  params:
+    n_estimators: 100
+    num_leaves: 31
+    learning_rate: 0.05
+    boosting_type: "gbdt"
+    pred_leaf: true
+
+random_forest:
+  enabled: true
+  params:
+    n_estimators: 100
+    max_depth: 10
+    n_jobs: -1
+    # Sklearn RF requires specific handling to get leaves
+    return_leaves: true
+
+embeddings:
+  # Dimension of the vector representing a single leaf node in PyTorch
+  leaf_embedding_dim: 4

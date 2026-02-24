@@ -1,0 +1,14 @@
+model:
+  name: "FraudLSTM"
+  type: "pytorch"
+  input_dim: 30  # Number of features per time step
+  hidden_dim: 64
+  num_layers: 2
+  dropout: 0.2
+  bidirectional: false
+
+training:
+  batch_size: 128  # Smaller batch size for sequences
+  epochs: 15
+  learning_rate: 0.001
+  early_stopping_patience: 4
