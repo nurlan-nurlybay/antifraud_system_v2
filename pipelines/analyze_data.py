@@ -8,60 +8,76 @@ def run_analysis(cfg_path: str):
     report_file = Path("reports/data_analysis.txt")
     report_file.parent.mkdir(exist_ok=True)
 
-    print("[1/3] Loading Data...")
+    print("Loading Data...")
     train_trans = pd.read_csv(cfg['paths']['train_transaction'])
     train_id = pd.read_csv(cfg['paths']['train_identity'])
     df = pd.merge(train_trans, train_id, on='TransactionID', how='left')
 
-    # Calculate global metrics
-    null_rates = df.isnull().mean()
-    # Numeric correlation only for this step
-    correlations = df.corr(numeric_only=True)['isFraud'].abs()
-
-    print("[2/3] Analyzing Feature Signal...")
-    analysis_rows = []
+    null_rates = df.isnull().mean() * 100
+    uniques = df.nunique()
     
+    # Identify Categoricals (Object strings)
+    cat_cols = df.select_dtypes(include=['object']).columns.tolist()
+    
+    # Numeric correlation only
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if 'isFraud' in num_cols: num_cols.remove('isFraud')
+    if 'TransactionID' in num_cols: num_cols.remove('TransactionID')
+        
+    correlations = df[num_cols + ['isFraud']].corr()['isFraud'].abs()
+
+    print("Building Report...")
+    data = []
     for col in df.columns:
-        if col == 'isFraud' or col == 'TransactionID': continue
+        if col in ['isFraud', 'TransactionID']: continue
         
         n_rate = null_rates[col]
-        # Correlation might be NaN for non-numeric or all-null cols
-        corr = correlations.get(col, 0.0)
-        if np.isnan(corr): corr = 0.0
+        u_count = uniques[col]
+        is_cat = col in cat_cols
         
-        uniques = df[col].nunique()
-        
-        # LOGIC: Discard if Nulls > 90% AND Correlation is very low (< 0.01)
-        # We keep high-null features if they show even a tiny signal
-        discard = n_rate > 0.90 and corr < 0.01
-        
-        analysis_rows.append({
+        if is_cat:
+            corr_str = "cat"
+            discard_str = "N/A"
+        else:
+            corr_val = correlations.get(col, 0.0)
+            if np.isnan(corr_val): corr_val = 0.0
+            corr_str = f"{corr_val:.4f}"
+            
+            # Discard logic: strictly for numeric features missing > 85% with low signal
+            discard_str = "YES" if (n_rate > 85.0 and corr_val < 0.01) else "NO"
+            
+        data.append({
             "Feature": col,
-            "Unique": uniques,
-            "Null_%": round(n_rate * 100, 2),
-            "Correlation": round(corr, 4),
-            "Discard": "YES" if discard else "NO"
+            "Unique": u_count,
+            "Null_%": round(n_rate, 2),
+            "Correlation": corr_str,
+            "Discard": discard_str,
+            "Is_Cat": is_cat
         })
 
-    analysis_df = pd.DataFrame(analysis_rows)
+    analysis_df = pd.DataFrame(data)
 
-    print("[3/3] Saving Report...")
+    # Table 1: 0% Missing (UID Candidates & Base Features)
+    t1 = analysis_df[analysis_df['Null_%'] == 0.0].drop(columns=['Is_Cat'])
+    
+    # Table 2: All True Categoricals
+    t2 = analysis_df[analysis_df['Is_Cat'] == True].drop(columns=['Is_Cat'])
+    
+    # Table 3: Top Missing (>85%) to evaluate Discards
+    t3 = analysis_df[analysis_df['Null_%'] > 85.0].drop(columns=['Is_Cat']).sort_values(by="Null_%", ascending=False)
+
+    print("Saving Report...")
     with open(report_file, "w") as f:
-        f.write("=== MISSING DATA & CORRELATION ANALYSIS ===\n\n")
+        f.write("=== TABLE 1: 0% MISSING FEATURES (UID Candidates) ===\n")
+        f.write(t1.to_string(index=False))
         
-        f.write("TOP 30 FEATURES WITH MOST MISSING DATA:\n")
-        # Sort by Null % to see the worst offenders
-        high_nulls = analysis_df.sort_values(by="Null_%", ascending=False).head(30)
-        f.write(high_nulls.to_string(index=False))
+        f.write("\n\n=== TABLE 2: ALL CATEGORICAL FEATURES (Strings) ===\n")
+        f.write(t2.to_string(index=False))
         
-        f.write("\n\n--------------------------------------------------\n")
-        
-        f.write("CATEGORICAL FEATURES (Correlation is N/A):\n")
-        # Show categoricals separately since Pearson correlation doesn't work on strings
-        cats = analysis_df[analysis_df['Correlation'] == 0.0].sort_values(by="Null_%", ascending=False).head(20)
-        f.write(cats.to_string(index=False))
+        f.write("\n\n=== TABLE 3: HIGH MISSING (>85%) & DISCARD FLAG ===\n")
+        f.write(t3.to_string(index=False))
 
-    print(f"Analysis complete. See {report_file}")
+    print(f"Done. Check {report_file}")
 
 if __name__ == "__main__":
     run_analysis("configs/data_prep.yaml")

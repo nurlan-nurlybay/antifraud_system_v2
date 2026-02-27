@@ -36,25 +36,24 @@ features:
     frequency_encoding:
       enabled: true
     
-    # Final list based on cardinality report
     columns:
+      # Found in both lists
       - "ProductCD"
       - "card4"
       - "card6"
       - "P_emaildomain"
       - "R_emaildomain"
-      - "addr1"
-      - "addr2"
       - "DeviceType"
       - "DeviceInfo"
+      - "id_12"
+      - "id_15"
+      - "id_16"
+      - "id_23"
+      - "id_27"
       - "id_30"
       - "id_31"
       - "id_33"
       - "id_34"
-      - "id_13"
-      - "id_12"
-      - "id_15"
-      - "id_16"
       - "id_35"
       - "id_36"
       - "id_37"
@@ -68,6 +67,12 @@ features:
       - "M7"
       - "M8"
       - "M9"
+      # Recovered from List 1 (The ones you missed)
+      - "id_28"
+      - "id_29"
+      # Numerical Labels (Kept as categorical for better signal)
+      - "addr1"
+      - "addr2"
 
   # Structural Engineering
   reduce_v_features: true
