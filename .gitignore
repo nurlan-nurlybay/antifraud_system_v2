@@ -218,6 +218,7 @@ __pycache__/
 .DS_Store
 outputs/
 data/raw/
-data/processed/
+data/processed/*
+!data/processed/README.md
 *.egg-info/
 *.csv

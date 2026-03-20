@@ -21,4 +21,5 @@ dependencies = [
     "fastapi",         # Deployment (API)
     "uvicorn",         # Deployment (Server)
     "pydantic"         # Data Validation
+    "structlog"        # Logging 
 ]
