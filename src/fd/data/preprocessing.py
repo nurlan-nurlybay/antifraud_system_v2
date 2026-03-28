@@ -81,11 +81,21 @@ class DataPreprocessor:
     """
     def __init__(self, cfg: dict):
         self.cfg = cfg
+        
+        # Dynamic Column Definitions from Config
+        self.id_col = cfg['data']['id_col']
+        self.time_col = cfg['data']['time_col']
+        self.target_col = cfg['data']['target_col']
+        self.amount_col = cfg['data']['amount_col']
+        
+        # Universal drop list for ML models (Metadata columns)
+        self.ignore_cols = ['Uid', self.id_col, self.time_col, self.target_col]
+
         self.scaler = StandardScaler()
         self.pca = PCA(n_components=cfg['features']['v_features_pca_dims'])
         self.te_encoder = KFoldTargetEncoder(
             cols=cfg['features']['categorical']['columns'],
-            target_col=cfg['data']['target_col'],
+            target_col=self.target_col,
             k=cfg['features']['categorical']['target_encoding'].get('k', 5),
             m=cfg['features']['categorical']['target_encoding'].get('m', 10)
         )
@@ -95,22 +105,17 @@ class DataPreprocessor:
     # --- STAGE 1: THE CLEAN BASE ---
 
     def clean_base_data(self, df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
-        """
-        Universal cleaning phase. Handles UID string optimization and basic string imputation.
-        Deliberately leaves numerical NaNs intact for downstream model-specific imputation.
-        """
         df = df.copy()
         
-        # Drop mathematical discards
         drop_cols = self.cfg['features'].get('drop_features', [])
         df = df.drop(columns=[c for c in drop_cols if c in df.columns])
 
-        # Create Uid (String -> Category -> Codes for extreme memory efficiency)
+        # Create Uid 
         uid_cols = self.cfg['features']['uid_columns']
         df['Uid'] = df[uid_cols].astype(str).agg('_'.join, axis=1).astype('category').cat.codes
         
-        # Sort Chronologically (Crucial for time-series splits)
-        df = df.sort_values(by=self.cfg['data']['time_col']).reset_index(drop=True)
+        # Sort Chronologically
+        df = df.sort_values(by=self.time_col).reset_index(drop=True)
 
         # Impute Strings
         cat_cols = [c for c in df.select_dtypes(include=['object']).columns if c != 'Uid']
@@ -121,52 +126,34 @@ class DataPreprocessor:
     # --- STAGE 2: MODEL-SPECIFIC TRANSFORMS ---
 
     def get_tree_features(self, df: pd.DataFrame, is_train: bool = True) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Path A: Optimized for XGBoost/CatBoost.
-        Fills numerical NaNs with -999 to create spatial splits in decision trees.
-        No scaling or PCA is applied.
-        """
         df = df.copy()
         df = self._apply_cyclical_time(df)
         df = self._apply_target_encoding(df, is_train)
         
-        # Tree-specific Imputation
-        num_cols = [c for c in df.select_dtypes(include=[np.number]).columns 
-                    if c not in ['TransactionID', self.cfg['data']['target_col'], 'TransactionDT', 'Uid']]
+        # Tree-specific Imputation using dynamic ignore list
+        num_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in self.ignore_cols]
         df[num_cols] = df[num_cols].fillna(-999)
         
-        y = df[self.cfg['data']['target_col']].values
-        X = df.drop(columns=['Uid', 'TransactionID', 'TransactionDT', self.cfg['data']['target_col']], errors='ignore').values
+        y = df[self.target_col].values
+        X = df.drop(columns=self.ignore_cols, errors='ignore').values
         return X.astype(np.float32), y.astype(np.int8)
 
     def get_mlp_features(self, df: pd.DataFrame, is_train: bool = True) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Path B: Optimized for Multi-Layer Perceptrons.
-        Applies scaling, PCA, and Median imputation with Binary Missingness Masks.
-        """
         df = self._transform_neural_base(df, is_train)
-        y = df[self.cfg['data']['target_col']].values
-        X = df.drop(columns=['Uid', 'TransactionID', 'TransactionDT', self.cfg['data']['target_col']], errors='ignore').values
+        y = df[self.target_col].values
+        X = df.drop(columns=self.ignore_cols, errors='ignore').values
         return X.astype(np.float32), y.astype(np.int8)
 
     def get_lstm_features(self, df: pd.DataFrame, is_train: bool = True) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Path C: Optimized for Sequence Models (LSTMs).
-        Groups records by UID and reshapes data into 3D tensors: [Batch, TimeStep, Feature].
-        """
         df = self._transform_neural_base(df, is_train)
         seq_len = self.cfg['data']['sequence_length']
-        target_col = self.cfg['data']['target_col']
         
-        feature_cols = [c for c in df.columns if c not in ['Uid', 'TransactionID', 'TransactionDT', target_col]]
-        
+        feature_cols = [c for c in df.columns if c not in self.ignore_cols]
         X_3d, y_final = [], []
         
-        # Group by integer UID to build chronological user history
         for _, group in df.groupby('Uid'):
             group_feats = group[feature_cols].values
             
-            # Pad sequences if transaction history is shorter than seq_len
             if len(group_feats) < seq_len:
                 padding = np.zeros((seq_len - len(group_feats), group_feats.shape[1]))
                 seq = np.vstack([padding, group_feats])
@@ -174,36 +161,26 @@ class DataPreprocessor:
                 seq = group_feats[-seq_len:]
                 
             X_3d.append(seq)
-            y_final.append(group[target_col].iloc[-1])
+            y_final.append(group[self.target_col].iloc[-1])
             
         return np.array(X_3d, dtype=np.float32), np.array(y_final, dtype=np.int8)
 
     # --- INTERNAL HELPER METHODS ---
 
     def _transform_neural_base(self, df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
-        """
-        Shared logic pipeline for all gradient-based neural paths (MLP & LSTM).
-        Safeguards the 'Signal of Absence' by generating _is_nan binary masks before imputation.
-        """
         df = df.copy()
-        num_cols = [c for c in df.select_dtypes(include=[np.number]).columns 
-                    if c not in ['TransactionID', self.cfg['data']['target_col'], 'TransactionDT', 'Uid']]
+        num_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in self.ignore_cols]
         
         if is_train:
             self.numerical_medians = df[num_cols].median().to_dict()
             self.nan_mask_columns = [c for c in num_cols if df[c].isnull().any()]
             
-        # Append Binary Missingness Masks
-        # for col in self.nan_mask_columns:
-        #     df[col + '_is_nan'] = df[col].isnull().astype(np.float32)  # I used this but below is a better one
-
         new_masks = {}
         for col in self.nan_mask_columns:
             new_masks[col + '_is_nan'] = df[col].isnull().astype(np.float32)
 
         df = pd.concat([df, pd.DataFrame(new_masks, index=df.index)], axis=1)
             
-        # Impute original columns with medians to stabilize Neural Net gradients
         for col in num_cols:
             df[col] = df[col].fillna(self.numerical_medians.get(col, 0))
 
@@ -211,15 +188,14 @@ class DataPreprocessor:
         df = self._apply_target_encoding(df, is_train)
         
         if self.cfg['features']['log_transform_amount']:
-            df[self.cfg['data']['amount_col']] = np.log1p(df[self.cfg['data']['amount_col']])
+            df[self.amount_col] = np.log1p(df[self.amount_col])
             
         df = self._apply_pca(df, is_train)
         df = self._apply_scaling(df, is_train)
         return df
 
     def _apply_cyclical_time(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Transforms timestamp into 24-hour sinusoidal wave to capture daily fraud cycles."""
-        df['hour'] = (df[self.cfg['data']['time_col']] // 3600) % 24
+        df['hour'] = (df[self.time_col] // 3600) % 24
         df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24).astype(np.float32)
         df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24).astype(np.float32)
         return df.drop(columns=['hour'])
@@ -232,7 +208,6 @@ class DataPreprocessor:
         return df.drop(columns=self.cfg['features']['categorical']['columns'])
 
     def _apply_pca(self, df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
-        """Compresses highly collinear V-features into configurable Principal Components."""
         v_cols = [c for c in df.columns if c.startswith('V')]
         if is_train: self.pca.fit(df[v_cols])
         v_pca = self.pca.transform(df[v_cols])
@@ -241,9 +216,7 @@ class DataPreprocessor:
         return pd.concat([df.drop(columns=v_cols), pca_df], axis=1)
 
     def _apply_scaling(self, df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
-        """Applies Standard Scaling to all numerical inputs, ignoring metadata columns."""
-        cols = [c for c in df.select_dtypes(include=[np.number]).columns 
-                if c not in [self.cfg['data']['target_col'], 'TransactionID', 'TransactionDT', 'Uid']]
+        cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in self.ignore_cols]
         if is_train: self.scaler.fit(df[cols])
         df[cols] = self.scaler.transform(df[cols]).astype(np.float32)
         return df

@@ -220,5 +220,7 @@ outputs/
 data/raw/
 data/processed/*
 !data/processed/README.md
+!data/processed/*.yaml
+!data/processed/*.py
 *.egg-info/
 *.csv

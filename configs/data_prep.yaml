@@ -9,9 +9,9 @@ paths:
   processed_dir: "data/processed"
 
 data:
-  val_size: 0.10
-  test_size: 0.10
+  meta_val_size: 0.10
   target_col: "isFraud"
+  id_col: "TransactionID"
   time_col: "TransactionDT"
   amount_col: "TransactionAmt"
   sequence_length: 5 

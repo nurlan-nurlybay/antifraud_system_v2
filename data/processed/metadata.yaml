@@ -1,0 +1,57 @@
+datasets:
+  X_y_dev_lstm.npz:
+    type: 3D (Sequence)
+    samples: 90080
+    timesteps: 5
+    features: 141
+    shape:
+    - 90080
+    - 5
+    - 141
+    fraud_rate_pct: 2.699
+  X_y_dev_mlp.npz:
+    type: 2D (Tabular)
+    samples: 531486
+    timesteps: 1
+    features: 141
+    shape:
+    - 531486
+    - 141
+    fraud_rate_pct: 3.471
+  X_y_dev_tree.npz:
+    type: 2D (Tabular)
+    samples: 531486
+    timesteps: 1
+    features: 433
+    shape:
+    - 531486
+    - 433
+    fraud_rate_pct: 3.471
+  X_y_meta_val_lstm.npz:
+    type: 3D (Sequence)
+    samples: 19977
+    timesteps: 5
+    features: 141
+    shape:
+    - 19977
+    - 5
+    - 141
+    fraud_rate_pct: 2.598
+  X_y_meta_val_mlp.npz:
+    type: 2D (Tabular)
+    samples: 59054
+    timesteps: 1
+    features: 141
+    shape:
+    - 59054
+    - 141
+    fraud_rate_pct: 3.747
+  X_y_meta_val_tree.npz:
+    type: 2D (Tabular)
+    samples: 59054
+    timesteps: 1
+    features: 433
+    shape:
+    - 59054
+    - 433
+    fraud_rate_pct: 3.747

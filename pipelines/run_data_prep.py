@@ -2,7 +2,7 @@
 Data Preparation Orchestrator Pipeline.
 
 This script executes the complete data preprocessing lifecycle. It loads raw CSVs, 
-determines strict chronological validation splits (L0, L1_Train, L1_Val), and safely 
+determines strict chronological validation splits (Dev 90% / Meta-Val 10%), and safely 
 processes the chunks via the `DataPreprocessor`. 
 
 It utilizes chunk-based merging and aggressive manual garbage collection to process 
@@ -25,9 +25,6 @@ logger = structlog.get_logger(__name__)
 def run_data_prep(cfg_path: str):
     """
     Main execution logic for the data preprocessing pipeline.
-    
-    Args:
-        cfg_path (str): Relative path to the data_prep YAML configuration file.
     """
     cfg = load_config(cfg_path)
     processed_dir = Path(cfg['paths']['processed_dir'])
@@ -40,21 +37,22 @@ def run_data_prep(cfg_path: str):
     train_trans = reduce_mem_usage(pd.read_csv(cfg['paths']['train_transaction']))
     train_id = reduce_mem_usage(pd.read_csv(cfg['paths']['train_identity']))
 
-    # 2. Determine Temporal Splits (Wall of Time integrity)
-    val_p = cfg['data']['val_size']
-    test_p = cfg['data']['test_size']
-    dev_p = 1.0 - val_p - test_p
+    # Extract dynamic column names from config
+    id_col = cfg['data']['id_col']
+    time_col = cfg['data']['time_col']
 
-    # Sort solely by TransactionDT to calculate chronological indices
-    temp_df = train_trans[['TransactionID', cfg['data']['time_col']]].sort_values(cfg['data']['time_col'])
+    # 2. Determine Temporal Splits (Wall of Time integrity)
+    meta_val_p = cfg['data']['meta_val_size']
+    dev_p = 1.0 - meta_val_p
+
+    # Sort solely by time column to calculate chronological indices
+    temp_df = train_trans[[id_col, time_col]].sort_values(time_col)
     n = len(temp_df)
     dev_idx = int(n * dev_p)
-    meta_train_idx = int(n * (dev_p + val_p))
 
     ids_map = {
-        "dev": temp_df.iloc[:dev_idx]['TransactionID'].values,
-        "meta_train": temp_df.iloc[dev_idx:meta_train_idx]['TransactionID'].values,
-        "meta_val": temp_df.iloc[meta_train_idx:]['TransactionID'].values
+        "dev": temp_df.iloc[:dev_idx][id_col].values,
+        "meta_val": temp_df.iloc[dev_idx:][id_col].values
     }
     
     del temp_df
@@ -62,7 +60,6 @@ def run_data_prep(cfg_path: str):
 
     logger.info("data_split_calculated", 
                 dev_size=len(ids_map['dev']), 
-                meta_train_size=len(ids_map['meta_train']), 
                 meta_val_size=len(ids_map['meta_val']))
 
     pp = DataPreprocessor(cfg)
@@ -73,9 +70,9 @@ def run_data_prep(cfg_path: str):
         logger.info("processing_split", split=name, is_train=is_train)
         
         # Merge locally to save RAM. Immediately delete objects not required.
-        df_clean = pd.merge(train_trans[train_trans['TransactionID'].isin(ids)], 
-                            train_id[train_id['TransactionID'].isin(ids)], 
-                            on='TransactionID', how='left')
+        df_clean = pd.merge(train_trans[train_trans[id_col].isin(ids)], 
+                            train_id[train_id[id_col].isin(ids)], 
+                            on=id_col, how='left')
         df_clean = reduce_mem_usage(df_clean, verbose=False)
         clear_memory()
         
