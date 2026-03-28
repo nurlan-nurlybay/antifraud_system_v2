@@ -2,50 +2,58 @@
 **Project:** Antifraud System v2.2  
 **Dataset:** IEEE-CIS Fraud Detection (Transaction & Identity)
 
-## 1. The Validation Strategy: The "Wall of Time"
-Unlike standard tabular datasets, financial transactions are strictly **non-i.i.d.** (Independent and Identically Distributed). Standard K-Fold or **Nested K-Fold CV** were rejected for this stage.
-* **The Problem with K-Fold:** In this dataset, multiple transactions often belong to the same user in a short window. Randomly shuffling these into training and validation folds leads to "Data Leakage," where the model "remembers" a specific user's behavior rather than learning general fraud patterns.
-* **The Solution:** We implemented a strict **Chronological Split (80/10/10)**. 
-    * **Dev Set (80%):** Used for L0 model training.
-    * **Meta-Train (10%):** Used to generate Out-Of-Fold (OOF) predictions for the Stacker.
-    * **Meta-Val (10%):** The final, untouched "future" data to verify system performance.
+## 1. Feature Engineering: Added & Dropped Dimensions
+The system transforms the raw 434-column IEEE-CIS dataset into optimized tensors by explicitly adding behavioral signals and removing high-cardinality or redundant noise.
+
+### 1.1 Engineered Features (Added)
+* **Uid (User Identifier):** Synthesized by concatenating `card1-6`, `addr1`, and `P_emaildomain`. This feature is used for chronological sorting and LSTM grouping before being moved to metadata.
+* **Cyclical Time (hour_sin, hour_cos):** Derived from `TransactionDT` to map the 86,400-second day into a circular wave, capturing 24-hour periodic fraud patterns.
+* **Target Encodings (_te):** All 33 categorical columns (e.g., `ProductCD`, `DeviceInfo`) were transformed into scalar likelihoods using 5-fold Bayesian smoothed target encoding.
+* **Binary Missingness Masks (_is_nan):** [Neural/LSTM Path only] 42+ new binary columns added to flag the "Signal of Absence" for critical numerical features like `D`-columns and `dist1`.
+* **Principal Components (V_pca_0, V_pca_1):** [Neural/LSTM Path only] Two linear projections capturing >99% variance of the 339 V-features.
+
+### 1.2 Feature Selection (Dropped)
+* **Metadata Discards:** `TransactionID`, `TransactionDT`, and `Uid` are removed from the feature matrix $X$ to prevent the model from memorizing specific IDs or timestamps.
+* **Raw Categoricals:** All original string/object columns are dropped after being replaced by their respective Target Encoded scalar versions.
+* **V-Feature Redundancy:** [Neural/LSTM Path only] The original 339 V-features are entirely discarded and replaced by the 2 PCA components.
+* **Target Leakage:** `isFraud` is extracted and saved as the target vector $y$.
 
 ---
 
-## 2. Dimensionality Reduction: PCA vs. The Alternatives
-The dataset contains **339 V-features** (V1-V339) which are highly collinear and redundant.
-* **Why PCA?** We utilized Principal Component Analysis to compress these 339 dimensions into just **2-5 components**, capturing over **99% of the variance**. 
-* **Why not UMAP or t-SNE?** While UMAP and t-SNE are excellent for visualization, they are non-linear and computationally expensive. More importantly, they do not provide a stable linear projection that can be easily applied to new, unseen data during inference without significant risk of manifold shift. PCA provides a stable, repeatable linear transformation optimized for the MLP and LSTM paths.
+## 2. Model-Specific Transformation Paths
+To maximize the mathematical strengths of different model archetypes, the pipeline bifurcates into four distinct normalization and transformation strategies.
 
+### 2.1 Universal Base Logic (All Paths)
+All transaction amounts are normalized using a Log-Transform ($\log(1+x)$) to handle the extreme positive skew and the presence of "Whale" transactions. Categorical encoding is standardized across all versions to ensure feature parity in the Meta-Stacker.
 
+### 2.2 Path A: Neural Transformation (MLP & VAE)
+* **Normalization:** Employs Z-score Standard Scaling (Mean 0, Std 1) for all 141 features. This ensures numerical stability for backpropagation and prevents the "Exploding Gradient" problem.
+* **Dimensionality:** Reduced to 141 features. This includes the 2 PCA V-components and the 42+ missingness masks required to preserve signal in the presence of medians.
+
+### 2.3 Path B: Tree-Based Transformation (XGBoost / CatBoost)
+* **Imputation:** Utilizes "Spatial Splitting" by filling all numerical NaNs with **-999**. This creates a distinct territory in the decision tree manifold for missing data.
+* **Dimensionality:** Retains the high-density 433-feature footprint. Decision trees natively handle the collinearity of the 339 V-features, making PCA unnecessary and potentially harmful to information gain.
+
+### 2.4 Path C: Sequence Transformation (LSTM)
+* **Reshaping:** Data is transformed into Rank-3 Tensors $[N, 5, 141]$. 
+* **Temporal Padding:** Individual user histories are truncated or pre-padded with zeros to reach a fixed depth of 5 timesteps.
+* **Feature Set:** Mirrors the MLP path (141 features) to ensure that behavioral shifts across the 5 steps are captured with standardized gradients.
 
 ---
 
 ## 3. The "Signal of Absence" (NaN Strategy)
-Initial analysis revealed a critical "Median Signal Killer." Standard imputation (filling NaNs with the median) was inadvertently sanitizing the data, making fraudsters look like "average" customers.
-* **The Discovery:** Many features in fraud detection are **MNAR** (Missing Not At Random). The absence of data (e.g., a missing proxy IP or device ID) is often a stronger fraud indicator than the data itself.
-* **The Solution:** * **Tree-Based Path:** Imputed with an out-of-bounds constant (**-999**). This allows decision trees to create a clean split between "Data Present" and "Data Missing."
-    * **Neural Path (MLP/LSTM):** Imputed with the **Median** to maintain gradient stability, but supplemented with a **Binary Mask** (`_is_nan` column). This forces the Neural Network to recognize the difference between a "real" average value and an "imputed" one.
+The system addresses the "Median Signal Killer" problem—where filling missing values with the median makes suspicious, data-poor transactions appear "average."
+* **The Strategy:** For tree models, the -999 constant allows for explicit binary splits on missingness. For neural models, the supplementary binary masks (`_is_nan`) force the network to weight the "fact of missingness" separately from the "imputed value," preserving the behavioral intent behind hidden data fields.
 
 ---
 
-## 4. Normalization & Transformation Techniques
-To ensure all model archetypes can converge efficiently, the following mathematical transforms were applied:
-* **Logarithmic Transform:** $TransactionAmt$ was transformed using $\log(1+x)$ to handle heavy-tailed skewness and reduce the influence of extreme outliers.
-* **Cyclical Time Encoding:** The $TransactionDT$ (seconds from start) was mapped to a 24-hour cycle using Sine and Cosine transforms:
-  $$\text{hour\_sin} = \sin\left(\frac{2\pi \cdot \text{hour}}{24}\right), \quad \text{hour\_cos} = \cos\left(\frac{2\pi \cdot \text{hour}}{24}\right)$$
-  This allows the model to understand that 23:59 and 00:01 are mathematically adjacent.
-* **Standard Scaling:** All numerical inputs for the Neural paths were Z-score normalized to a mean of 0 and standard deviation of 1.
+## 4. Artifact Structure
+The preprocessing pipeline outputs the following compressed `.npz` files, split into a **90% Dev Set** and a **10% Meta-Validation Set**.
 
----
+| Artifact | Purpose | Depth | Feature Width | Fraud Rate |
+| :--- | :--- | :--- | :--- | :--- |
+| `X_y_dev_tree.npz` | Tree Training | 1 (2D) | 433 | 3.47% |
+| `X_y_dev_mlp.npz` | Neural Training | 1 (2D) | 141 | 3.47% |
+| `X_y_dev_lstm.npz` | Sequence Training | 5 (3D) | 141 | 2.69%* |
 
-## 5. Artifact Structure
-The preprocessing pipeline outputs three distinct `.npz` files for each split to minimize memory overhead during training:
-
-| Artifact | Purpose | Imputation | Dimensionality |
-| :--- | :--- | :--- | :--- |
-| `_tree.npz` | XGBoost/CatBoost | -999 | Raw (Target Encoded) |
-| `_mlp.npz` | Neural Base | Median + Mask | PCA Compressed |
-| `_lstm.npz` | Sequence Model | Median + Mask | 3D Tensors $[N, 5, F]$ |
-
----
+*\*Note: The LSTM fraud rate is lower because labels are assigned based only on the latest transaction in a user's 5-step sequence.*
