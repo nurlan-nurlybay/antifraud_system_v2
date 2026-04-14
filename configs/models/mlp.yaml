@@ -1,23 +1,22 @@
 model:
-  name: "FraudMLP"
-  type: "pytorch"
-  input_dim: 141  # Confirmed via metadata.yaml
-  hidden_dims: [512, 256, 128]
-  dropout: 0.3
-  activation: "relu"
-  use_batchnorm: true
-
+  name: FraudMLP
+  type: pytorch
+  input_dim: 195
+  hidden_dims:
+  - 32
+  - 32
+  dropout: 0.2632
 training:
-  batch_size: 1024
+  batch_size: 2048
   epochs: 100
-  learning_rate: 0.001
-  weight_decay: 1e-5
+  learning_rate: 0.00029442
+  weight_decay: 1.0e-05
+  l1_lambda: 3.1e-06
   early_stopping_patience: 10
-
 loss_params:
-  type: "focal"   # or "wbce" for baseline tests
+  type: focal
   focal:
-    alpha: 0.8    # Tunable via Optuna
-    gamma: 2.0    # Tunable via Optuna
+    alpha: 0.587
+    gamma: 1.974
   wbce:
-    pos_weight: 32.0 # ~97/3 ratio
+    pos_weight: 32.0

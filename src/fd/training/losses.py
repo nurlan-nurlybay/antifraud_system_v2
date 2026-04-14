@@ -1,35 +1,5 @@
 """
 Custom Loss Functions for Imbalanced Fraud Detection.
-Default gamma = 2.0 for Focal Loss, alpha = 0.8 for class weighting.
-We want to keep alpha < true imbalance (0.97) to avoid overfitting, 
-gamma makes up for the rest of the imbalance handling.
-
-Btw maybe it would make sense to define alpha and gamma in configs 
-rather than as defaults in init.
-"""
-# from math import log
-
-# class FocalLoss:
-#     def __init__(self, a: float = 0.97, y: int = 2) -> None:
-#         self._a = a
-#         self._y = y
-
-#     def loss(self, P, Y):  # P is an array of predictions for a batch, Y is the real values
-#         total = 0
-#         N = len(P)
-#         for i, p in enumerate(P):
-#             if Y[i] == 1:  # fraud
-#                 l = self._a * (1-p)**self._y * log(p)
-#             elif Y[i] == 0:  # normal 
-#                 l = (1-self._a) * p**self._y * log(1-p)
-#             else:
-#                 raise RuntimeError("Class neither 1 nor 0.")
-#             total += l
-
-#         return -total/N
-
-"""
-Custom Loss Functions for Imbalanced Fraud Detection.
 
 Provides Focal Loss for advanced gradient weighting and Weighted BCE 
 for baseline comparisons.
@@ -51,6 +21,15 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute the Focal Loss for binary classification.
+
+        Args:
+            inputs (torch.Tensor): Logits predicted by the model, shape (N, 1) or (N,).
+            targets (torch.Tensor): Binary targets, shape (N,) or (N, 1).
+
+        Returns:
+            torch.Tensor: The computed Focal Loss. Reduction is controlled by ``self.reduction``.
+        """
         targets = targets.view(-1, 1).float()
         inputs = inputs.view(-1, 1)
 
@@ -84,8 +63,49 @@ class WeightedBCE(nn.Module):
         self.register_buffer('pos_weight', torch.tensor([pos_weight]))
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute weighted BCE from logits and binary targets.
+
+        Args:
+            inputs (torch.Tensor): Logits predicted by the model, shape (N, 1) or (N,).
+            targets (torch.Tensor): Binary targets, shape (N,) or (N, 1).
+
+        Returns:
+            torch.Tensor: Weighted binary cross entropy loss.
+        """
         return F.binary_cross_entropy_with_logits(
             inputs, 
             targets.view(-1, 1).float(), 
             pos_weight=self.pos_weight
         )
+
+
+
+"""
+Custom Loss Functions for Imbalanced Fraud Detection.
+Default gamma = 2.0 for Focal Loss, alpha = 0.8 for class weighting.
+We want to keep alpha < true imbalance (0.97) to avoid overfitting, 
+gamma makes up for the rest of the imbalance handling.
+
+Btw maybe it would make sense to define alpha and gamma in configs 
+rather than as defaults in init.
+"""
+# from math import log
+
+# class FocalLoss:
+#     def __init__(self, a: float = 0.97, y: int = 2) -> None:
+#         self._a = a
+#         self._y = y
+
+#     def loss(self, P, Y):  # P is an array of predictions for a batch, Y is the real values
+#         total = 0
+#         N = len(P)
+#         for i, p in enumerate(P):
+#             if Y[i] == 1:  # fraud
+#                 l = self._a * (1-p)**self._y * log(p)
+#             elif Y[i] == 0:  # normal 
+#                 l = (1-self._a) * p**self._y * log(1-p)
+#             else:
+#                 raise RuntimeError("Class neither 1 nor 0.")
+#             total += l
+
+#         return -total/N

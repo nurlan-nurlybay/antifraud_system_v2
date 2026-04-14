@@ -1,84 +1,78 @@
 """
 Core Data Preprocessing Engine.
 
-This module houses the KFold Target Encoder and the DataPreprocessor engine. 
+This module houses the Expanding Mean Target Encoder and the DataPreprocessor engine. 
 It defines the distinct feature engineering paths (Trees, MLP, LSTM) required 
 for the Hybrid Meta-Model Architecture, explicitly handling the 'Signal of Absence' 
 (NaN imputation) depending on the target model's mathematical properties.
+
+*UPDATED*: Zero Temporal Leakage achieved using Expanding Window (Cumulative) Encoders.
+All transformers natively save state artifacts for production inference.
 """
 
 import pandas as pd
 import numpy as np
 import structlog
-from sklearn.model_selection import KFold
+import joblib
+from pathlib import Path
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from src.fd.utils.logging import setup_logger
 
 logger = structlog.get_logger(__name__)
 
-class KFoldTargetEncoder:
+class ExpandingMeanEncoder:
     """
-    Computes Target Encoding using K-Fold out-of-fold averages to prevent data leakage.
-    Applies Bayesian smoothing to prevent overfitting on low-frequency categories.
+    Computes Target Encoding purely chronologically to give 0 data leakage.
+    For transaction `i`, the encoding is the smoothed mean of target values
+    for transactions `0` to `i-1` having that same category.
     """
-    def __init__(self, cols: list[str], target_col: str, k: int = 5, m: int = 10):
+    def __init__(self, cols: list[str], target_col: str, m: int = 10):
         self.cols = cols
         self.target_col = target_col
-        self.k = k
         self.m = m
         self.global_mean: float = 0.0
-        self.category_mappings: dict[str, pd.Series] = {}
+        self.category_mappings: dict[str, dict[str, float]] = {}
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Fits mappings on K-folds and returns the encoded training DataFrame.
-        Includes safety casts to float32 to bypass Pandas Cython int8 agg bugs.
-        """
         df_encoded = df.copy()
-        kf = KFold(n_splits=self.k, shuffle=True, random_state=42)
         
-        # Cast target to float32 locally to avoid Pandas int8 Cython agg bugs
+        # Cast target to float32 to bypass Pandas int8 aggregation bugs
         target_series = df[self.target_col].astype(np.float32)
         self.global_mean = float(target_series.mean())
 
         for col in self.cols:
-            df_encoded[col + '_te'] = np.nan
+            self.category_mappings[col] = {}
+            # Group by category, then expand
+            # Note: The dataframe MUST be sorted chronologically before this is called
+            # We use cumulative sum and count
+            cumsum = df.groupby(col)[self.target_col].cumsum() - df[self.target_col]
+            cumcount = df.groupby(col).cumcount() 
             
-            group_col_series = df[col]
-            if str(group_col_series.dtype) == 'float16':
-                group_col_series = group_col_series.astype(np.float32)
+            # Apply Bayesian Smoothing formulation dynamically per row
+            smoothed_mean = (cumsum + self.m * self.global_mean) / (cumcount + self.m)
+            df_encoded[col + '_te'] = smoothed_mean.astype(np.float32)
 
-            # Create safe, temporary DataFrame for out-of-fold math
-            temp_df = pd.DataFrame({col: group_col_series, self.target_col: target_series})
+            # Save the LAST known moving average to apply to Val/Test sets
+            final_stats = df.groupby(col)[self.target_col].agg(['sum', 'count'])
+            for cat, row in final_stats.iterrows():
+                final_smooth = (row['sum'] + self.m * self.global_mean) / (row['count'] + self.m)
+                self.category_mappings[col][str(cat)] = float(final_smooth)
 
-            for train_idx, val_idx in kf.split(temp_df):
-                X_train, X_val = temp_df.iloc[train_idx], temp_df.iloc[val_idx]
-                fold_prior = float(X_train[self.target_col].mean())
-                
-                # Bayesian Smoothing formula
-                stats = X_train.groupby(col)[self.target_col].agg(['mean', 'count'])
-                smoothed = (stats['count'] * stats['mean'] + self.m * fold_prior) / (stats['count'] + self.m)
-                df_encoded.loc[df.index[val_idx], col + '_te'] = X_val[col].map(smoothed).fillna(fold_prior)
-
-            # Save full training mapping for future transform() calls (Inference)
-            full_stats = temp_df.groupby(col)[self.target_col].agg(['mean', 'count'])
-            self.category_mappings[col] = (full_stats['count'] * full_stats['mean'] + self.m * self.global_mean) / (full_stats['count'] + self.m)
-            
-        return df_encoded
+        return df_encoded.drop(columns=self.cols, errors='ignore')
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Applies previously learned mapping dictionaries to Validation/Test sets."""
         df_encoded = df.copy()
         for col in self.cols:
-            df_encoded[col + '_te'] = df[col].map(self.category_mappings[col]).fillna(self.global_mean)
-        return df_encoded
+            mapping = self.category_mappings.get(col, {})
+            # Fast map with fallback to global uniform prior
+            mapped_series = df[col].map(mapping).fillna(self.global_mean)
+            df_encoded[col + '_te'] = mapped_series.astype(np.float32)
+            
+        return df_encoded.drop(columns=self.cols, errors='ignore')
 
 
 class DataPreprocessor:
-    """
-    Modular preprocessing engine for IEEE-CIS data. 
-    Produces three distinct datasets optimized for specific model archetypes.
-    """
     def __init__(self, cfg: dict):
         self.cfg = cfg
         
@@ -91,20 +85,20 @@ class DataPreprocessor:
         # Universal drop list for ML models (Metadata columns)
         self.ignore_cols = ['Uid', self.id_col, self.time_col, self.target_col]
 
-        self.scaler = StandardScaler()
-        self.pca = PCA(n_components=cfg['features']['v_features_pca_dims'])
-        self.te_encoder = KFoldTargetEncoder(
+        self.scaler = StandardScaler()       # Global scaler for all numeric features
+        self.v_scaler = StandardScaler()      # Dedicated scaler for V-features BEFORE PCA
+        # Deterministic PCA
+        self.pca = PCA(n_components=cfg['features']['v_features_pca_dims'], random_state=42)
+        self.te_encoder = ExpandingMeanEncoder(
             cols=cfg['features']['categorical']['columns'],
             target_col=self.target_col,
-            k=cfg['features']['categorical']['target_encoding'].get('k', 5),
             m=cfg['features']['categorical']['target_encoding'].get('m', 10)
         )
         self.numerical_medians = {}
         self.nan_mask_columns = []
 
     # --- STAGE 1: THE CLEAN BASE ---
-
-    def clean_base_data(self, df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
+    def clean_base_data(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         
         drop_cols = self.cfg['features'].get('drop_features', [])
@@ -114,8 +108,16 @@ class DataPreprocessor:
         uid_cols = self.cfg['features']['uid_columns']
         df['Uid'] = df[uid_cols].astype(str).agg('_'.join, axis=1).astype('category').cat.codes
         
-        # Sort Chronologically
+        # Sort Chronologically (CRITICAL for Expanding Target Encoder)
         df = df.sort_values(by=self.time_col).reset_index(drop=True)
+
+        # VELOCITY FEATURE: Time since last transaction for this specific user
+        df['time_dist_last'] = df.groupby('Uid')[self.time_col].diff()
+
+        # ROLLING AMOUNT VELOCITY: Detects spending anomalies per user
+        rolling_amt = df.groupby('Uid')[self.amount_col].rolling(window=5, min_periods=1)
+        df['amt_rolling_mean'] = rolling_amt.mean().reset_index(level=0, drop=True)
+        df['amt_rolling_std'] = rolling_amt.std().reset_index(level=0, drop=True).fillna(0)
 
         # Impute Strings
         cat_cols = [c for c in df.select_dtypes(include=['object']).columns if c != 'Uid']
@@ -124,7 +126,6 @@ class DataPreprocessor:
         return df
 
     # --- STAGE 2: MODEL-SPECIFIC TRANSFORMS ---
-
     def get_tree_features(self, df: pd.DataFrame, is_train: bool = True) -> tuple[np.ndarray, np.ndarray]:
         df = df.copy()
         df = self._apply_cyclical_time(df)
@@ -134,46 +135,65 @@ class DataPreprocessor:
         num_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in self.ignore_cols]
         df[num_cols] = df[num_cols].fillna(-999)
         
-        y = df[self.target_col].values
+        y = df[self.target_col].values if self.target_col in df.columns else None
         X = df.drop(columns=self.ignore_cols, errors='ignore').values
-        return X.astype(np.float32), y.astype(np.int8)
+        return X.astype(np.float32), (y.astype(np.int8) if y is not None else None)
 
     def get_mlp_features(self, df: pd.DataFrame, is_train: bool = True) -> tuple[np.ndarray, np.ndarray]:
         df = self._transform_neural_base(df, is_train)
-        y = df[self.target_col].values
+        y = df[self.target_col].values if self.target_col in df.columns else None
         X = df.drop(columns=self.ignore_cols, errors='ignore').values
-        return X.astype(np.float32), y.astype(np.int8)
+        return X.astype(np.float32), (y.astype(np.int8) if y is not None else None)
 
     def get_lstm_features(self, df: pd.DataFrame, is_train: bool = True) -> tuple[np.ndarray, np.ndarray]:
+        """Transaction-centric rolling window LSTM features."""
         df = self._transform_neural_base(df, is_train)
         seq_len = self.cfg['data']['sequence_length']
         
         feature_cols = [c for c in df.columns if c not in self.ignore_cols]
-        X_3d, y_final = [], []
+        n_features = len(feature_cols)
+        n_rows = len(df)
         
-        for _, group in df.groupby('Uid'):
-            group_feats = group[feature_cols].values
+        features = df[feature_cols].values.astype(np.float32)
+        uids = df['Uid'].values
+        y = df[self.target_col].values.astype(np.int8) if self.target_col in df.columns else None
+        
+        user_history: dict[int, list[int]] = {}
+        for i in range(n_rows):
+            uid = int(uids[i])
+            if uid not in user_history:
+                user_history[uid] = []
+            user_history[uid].append(i)
+        
+        X_3d = np.zeros((n_rows, seq_len, n_features), dtype=np.float32)
+        user_position: dict[int, int] = {} 
+        
+        for i in range(n_rows):
+            uid = int(uids[i])
+            user_position[uid] = user_position.get(uid, -1) + 1
+            pos = user_position[uid]
+            history = user_history[uid]
             
-            if len(group_feats) < seq_len:
-                padding = np.zeros((seq_len - len(group_feats), group_feats.shape[1]))
-                seq = np.vstack([padding, group_feats])
-            else:
-                seq = group_feats[-seq_len:]
-                
-            X_3d.append(seq)
-            y_final.append(group[self.target_col].iloc[-1])
+            n_available = pos + 1
+            n_to_copy = min(n_available, seq_len)
             
-        return np.array(X_3d, dtype=np.float32), np.array(y_final, dtype=np.int8)
+            start_hist_idx = pos - n_to_copy + 1
+            for j in range(n_to_copy):
+                X_3d[i, seq_len - n_to_copy + j, :] = features[history[start_hist_idx + j]]
+        
+        return X_3d, y
 
     # --- INTERNAL HELPER METHODS ---
-
     def _transform_neural_base(self, df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
         df = df.copy()
         num_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in self.ignore_cols]
         
         if is_train:
             self.numerical_medians = df[num_cols].median().to_dict()
-            self.nan_mask_columns = [c for c in num_cols if df[c].isnull().any()]
+            # Exclude V-features from NaN masks — they're being PCA'd away.
+            # Their missingness patterns are captured by trees via -999.
+            import re
+            self.nan_mask_columns = [c for c in num_cols if df[c].isnull().any() and not re.match(r'^V\d+$', c)]
             
         new_masks = {}
         for col in self.nan_mask_columns:
@@ -189,34 +209,87 @@ class DataPreprocessor:
         
         if self.cfg['features']['log_transform_amount']:
             df[self.amount_col] = np.log1p(df[self.amount_col])
+            df['time_dist_last'] = np.log1p(df['time_dist_last'].clip(lower=0))
             
         df = self._apply_pca(df, is_train)
         df = self._apply_scaling(df, is_train)
         return df
 
     def _apply_cyclical_time(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Hour-of-day: captures nocturnal fraud patterns
         df['hour'] = (df[self.time_col] // 3600) % 24
         df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24).astype(np.float32)
         df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24).astype(np.float32)
-        return df.drop(columns=['hour'])
+        # Day-of-week: captures weekend vs weekday spending
+        df['day'] = (df[self.time_col] // 86400) % 7
+        df['day_sin'] = np.sin(2 * np.pi * df['day'] / 7).astype(np.float32)
+        df['day_cos'] = np.cos(2 * np.pi * df['day'] / 7).astype(np.float32)
+        return df.drop(columns=['hour', 'day'])
 
     def _apply_target_encoding(self, df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
         if is_train:
             df = self.te_encoder.fit_transform(df)
         else:
             df = self.te_encoder.transform(df)
-        return df.drop(columns=self.cfg['features']['categorical']['columns'])
+        return df
 
     def _apply_pca(self, df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
-        v_cols = [c for c in df.columns if c.startswith('V')]
-        if is_train: self.pca.fit(df[v_cols])
-        v_pca = self.pca.transform(df[v_cols])
+        # Select ONLY raw V columns (V1..V339), NOT V*_is_nan masks
+        import re
+        v_cols = [c for c in df.columns if re.match(r'^V\d+$', c)]
+        
+        # Scale V-features BEFORE PCA (critical for honest variance decomposition)
+        if is_train:
+            self.v_scaler.fit(df[v_cols])
+        v_scaled = self.v_scaler.transform(df[v_cols])
+        
+        if is_train:
+            self.pca.fit(v_scaled)
+        v_pca = self.pca.transform(v_scaled)
+        
         pca_cols = [f'V_pca_{i}' for i in range(self.cfg['features']['v_features_pca_dims'])]
-        pca_df = pd.DataFrame(v_pca, columns=pca_cols, index=df.index, dtype=np.float32)
-        return pd.concat([df.drop(columns=v_cols), pca_df], axis=1)
+        df_pca = pd.DataFrame(v_pca, columns=pca_cols, index=df.index).astype(np.float32)
+        return pd.concat([df.drop(columns=v_cols), df_pca], axis=1)
 
     def _apply_scaling(self, df: pd.DataFrame, is_train: bool = True) -> pd.DataFrame:
-        cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in self.ignore_cols]
-        if is_train: self.scaler.fit(df[cols])
-        df[cols] = self.scaler.transform(df[cols]).astype(np.float32)
+        num_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in self.ignore_cols]
+        if is_train:
+            self.scaler.fit(df[num_cols])
+        df[num_cols] = self.scaler.transform(df[num_cols]).astype(np.float32)
         return df
+
+    # --- ARTIFACT PERSISTENCE ---
+    def save_artifacts(self, output_dir: str = "models/preprocessors"):
+        """Saves deterministic artifacts to disk to ensure flawless test inference."""
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        
+        artifact_path = out / "preprocessor.joblib"
+        bundle = {
+            "scaler": self.scaler,
+            "v_scaler": self.v_scaler,
+            "pca": self.pca,
+            "te_encoder": self.te_encoder,
+            "numerical_medians": self.numerical_medians,
+            "nan_mask_columns": self.nan_mask_columns
+        }
+        
+        joblib.dump(bundle, artifact_path)
+        logger.info("Saved data preprocessing artifacts", path=str(artifact_path))
+
+    def load_artifacts(self, input_dir: str = "models/preprocessors"):
+        """Loads deterministic artifacts from disk to ensure flawless test inference."""
+        artifact_path = Path(input_dir) / "preprocessor.joblib"
+        if not artifact_path.exists():
+            raise FileNotFoundError(f"Missing preprocessor state: {artifact_path}")
+            
+        bundle = joblib.load(artifact_path)
+        self.scaler = bundle["scaler"]
+        self.v_scaler = bundle.get("v_scaler")  # backwards compat if using an old bundle
+        self.pca = bundle["pca"]
+        self.te_encoder = bundle["te_encoder"]
+        self.numerical_medians = bundle["numerical_medians"]
+        self.nan_mask_columns = bundle["nan_mask_columns"]
+        
+        logger.info("Loaded data preprocessing artifacts", path=str(artifact_path))
+

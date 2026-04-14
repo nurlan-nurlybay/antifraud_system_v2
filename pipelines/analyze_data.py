@@ -1,175 +1,190 @@
+"""
+Data Analysis & PCA Scree Plot Generator — Antifraud System v2.0
+
+Uses the ACTUAL preprocessing pipeline (ExpandingMeanEncoder, cyclical time,
+rolling velocity, NaN masks, StandardScaler) to prepare the V-features
+BEFORE running PCA. This gives an honest variance decomposition.
+
+Usage:
+    PYTHONPATH=. python pipelines/analyze_data.py
+"""
+
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.decomposition import PCA
-from sklearn.model_selection import KFold
+from sklearn.preprocessing import StandardScaler
 from src.fd.utils.config import load_config
+from src.fd.data.preprocessing import DataPreprocessor
+from src.fd.utils.memory import reduce_mem_usage, clear_memory
 
-def plot_and_analyze_pca(df: pd.DataFrame):
-    """
-    Performs PCA on V-features to find the 'Elbow'.
-    Saves a visualization and returns formatted stats for the manifest.
-    """
-    v_cols = [c for c in df.columns if c.startswith('V')]
-    if not v_cols:
-        return None, 0
-
-    # PCA fit (Filling NaNs with 0 strictly for variance exploration)
-    pca = PCA().fit(df[v_cols].fillna(0))
-    exp_var_ratio = pca.explained_variance_ratio_
-    cum_var_ratio = np.cumsum(exp_var_ratio)
-
-    # --- Plotting Top 10 PCs for visual verification ---
-    plt.figure(figsize=(12, 7))
-    plt.bar(range(1, 11), exp_var_ratio[:10], alpha=0.4, align='center', label='Individual Variance')
-    plt.step(range(1, 11), cum_var_ratio[:10], where='mid', label='Cumulative Variance', color='red', linewidth=2)
-    plt.axhline(y=0.95, color='green', linestyle='--', label='95% Threshold')
-    plt.axhline(y=0.99, color='blue', linestyle=':', label='99% Threshold')
-    
-    plt.ylabel('Explained Variance Ratio')
-    plt.xlabel('Principal Component Index (Top 10)')
-    plt.title('V-Features PCA: Top 10 Components Variance Analysis')
-    plt.legend(loc='best')
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    
-    plot_path = Path("reports/v_features_pca_variance.png")
-    plt.savefig(plot_path)
-    plt.close()
-    print(f"PCA Variance Plot saved to {plot_path}")
-
-    # Numerical Breakdown for Report
-    stats = []
-    for i in range(min(10, len(exp_var_ratio))):
-        stats.append({
-            "PC": i + 1,
-            "Ind": round(exp_var_ratio[i] * 100, 2),
-            "Cum": round(cum_var_ratio[i] * 100, 2)
-        })
-    return stats, len(v_cols)
-
-def run_analysis(cfg_path: str):
+def run_analysis(cfg_path: str = "configs/data_prep.yaml"):
     cfg = load_config(cfg_path)
-    report_file = Path("reports/data_analysis.txt")
-    report_file.parent.mkdir(parents=True, exist_ok=True)
+    reports_dir = Path("reports")
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    # =========================================================================
+    # 1. LOAD & PREPROCESS (same path as run_data_prep.py — no PCA applied)
+    # =========================================================================
+    print("Loading raw data...")
+    train_trans = reduce_mem_usage(pd.read_csv(cfg['paths']['train_transaction']))
+    train_id = reduce_mem_usage(pd.read_csv(cfg['paths']['train_identity']))
+    df = pd.merge(train_trans, train_id, on=cfg['data']['id_col'], how='left')
+    df = reduce_mem_usage(df, verbose=False)
+    del train_trans, train_id
+    clear_memory()
     
-    print("🚀 Loading Data for Deep Analysis (Transaction + Identity)...")
-    train_trans = pd.read_csv(cfg['paths']['train_transaction'])
-    train_id = pd.read_csv(cfg['paths']['train_identity'])
-    df = pd.merge(train_trans, train_id, on='TransactionID', how='left')
-    target = cfg['data']['target_col']
+    print(f"Dataset loaded: {df.shape}")
 
-    # --- 1. PCA ANALYSIS ---
-    print("Performing PCA Analysis on V-features...")
-    pca_stats, v_count = plot_and_analyze_pca(df)
-
-    # --- 2. NUMERIC DISCARD LOGIC (Checking Raw vs. Missingness Signal) ---
-    print("Evaluating Numerics (Detecting 'Signal of Absence')...")
-    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    eval_nums = [c for c in num_cols if c not in [target, 'TransactionID', 'TransactionDT'] and not c.startswith('V')]
+    # Run our preprocessor's clean_base_data (creates Uid, sorts chronologically,
+    # adds velocity, rolling amount features, imputes categoricals)
+    pp = DataPreprocessor(cfg)
+    df = pp.clean_base_data(df)
     
-    num_discards = []
+    # Run the neural base transforms WITHOUT PCA:
+    # NaN masks, median imputation, cyclical time, target encoding, log transforms
+    target_col = cfg['data']['target_col']
+    ignore_cols = pp.ignore_cols
     
-    for col in eval_nums:
-        n_rate = df[col].isnull().mean()
+    num_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in ignore_cols]
+    pp.numerical_medians = df[num_cols].median().to_dict()
+    pp.nan_mask_columns = [c for c in num_cols if df[c].isnull().any()]
+    
+    # Add NaN masks
+    for col in pp.nan_mask_columns:
+        df[col + '_is_nan'] = df[col].isnull().astype(np.float32)
+    
+    # Fill NaNs
+    for col in num_cols:
+        df[col] = df[col].fillna(pp.numerical_medians.get(col, 0))
+    
+    # Cyclical time
+    df = pp._apply_cyclical_time(df)
+    
+    # Expanding Target Encoding
+    df = pp._apply_target_encoding(df, is_train=True)
+    
+    # Log transforms
+    if cfg['features']['log_transform_amount']:
+        df[cfg['data']['amount_col']] = np.log1p(df[cfg['data']['amount_col']])
+        df['time_dist_last'] = np.log1p(df['time_dist_last'].clip(lower=0))
+
+    # =========================================================================
+    # 2. SCALED PCA ANALYSIS ON V-FEATURES
+    # =========================================================================
+    import re
+    v_cols = [c for c in df.columns if re.match(r'^V\d+$', c)]
+    n_v = len(v_cols)
+    print(f"\nFound {n_v} V-features for PCA analysis")
+    
+    V_data = df[v_cols].values.astype(np.float32)
+    
+    # THIS IS THE FIX: Scale BEFORE PCA
+    scaler = StandardScaler()
+    V_scaled = scaler.fit_transform(V_data)
+    del V_data
+    clear_memory()
+    
+    print("Running PCA on SCALED V-features...")
+    pca = PCA(random_state=42)
+    pca.fit(V_scaled)
+    
+    exp_var = pca.explained_variance_ratio_
+    cum_var = np.cumsum(exp_var)
+    
+    # Find thresholds
+    n_95 = int(np.searchsorted(cum_var, 0.95)) + 1
+    n_99 = int(np.searchsorted(cum_var, 0.99)) + 1
+    
+    print(f"\n{'='*50}")
+    print(f"PCA RESULTS (SCALED V-features)")
+    print(f"{'='*50}")
+    print(f"Components for 95% variance: {n_95}")
+    print(f"Components for 99% variance: {n_99}")
+    print(f"\nTop 100 components:")
+    print(f"{'PC':>4} | {'Individual %':>14} | {'Cumulative %':>14}")
+    print(f"{'-'*4}-+-{'-'*14}-+-{'-'*14}")
+    for i in range(min(100, len(exp_var))):
+        print(f"{i+1:4d} | {exp_var[i]*100:13.2f}% | {cum_var[i]*100:13.2f}%")
+
+    # =========================================================================
+    # 3. SCREE PLOT
+    # =========================================================================
+    n_show = min(100, len(exp_var))
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+    fig.suptitle('V-Features PCA Variance Analysis (StandardScaler Applied)', fontsize=14, fontweight='bold')
+    
+    # Left: Top 30 components
+    ax1.bar(range(1, n_show+1), exp_var[:n_show]*100, alpha=0.5, color='steelblue', label='Individual')
+    ax1.step(range(1, n_show+1), cum_var[:n_show]*100, where='mid', color='crimson', linewidth=2, label='Cumulative')
+    ax1.axhline(y=95, color='green', linestyle='--', alpha=0.7, label=f'95% → {n_95} PCs')
+    ax1.axhline(y=99, color='blue', linestyle=':', alpha=0.7, label=f'99% → {n_99} PCs')
+    ax1.set_xlabel('Principal Component')
+    ax1.set_ylabel('Explained Variance (%)')
+    ax1.set_title(f'Top {n_show} Components')
+    ax1.legend(loc='center right')
+    ax1.grid(axis='y', alpha=0.3)
+    
+    # Right: Full cumulative curve
+    ax2.plot(range(1, len(cum_var)+1), cum_var*100, color='crimson', linewidth=2)
+    ax2.axhline(y=95, color='green', linestyle='--', alpha=0.7, label=f'95% @ {n_95} PCs')
+    ax2.axhline(y=99, color='blue', linestyle=':', alpha=0.7, label=f'99% @ {n_99} PCs')
+    ax2.axvline(x=n_95, color='green', linestyle='--', alpha=0.3)
+    ax2.axvline(x=n_99, color='blue', linestyle=':', alpha=0.3)
+    ax2.set_xlabel('Number of Components')
+    ax2.set_ylabel('Cumulative Variance (%)')
+    ax2.set_title(f'Full Curve ({n_v} V-features)')
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    plot_path = reports_dir / "v_features_pca_variance.png"
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"\nScree plot saved to {plot_path}")
+    
+    # =========================================================================
+    # 4. WRITE REPORT
+    # =========================================================================
+    report_path = reports_dir / "data_analysis.txt"
+    with open(report_path, "w") as f:
+        f.write("=" * 60 + "\n")
+        f.write("ANTIFRAUD v2.0 — DATA ANALYSIS REPORT\n")
+        f.write("=" * 60 + "\n\n")
         
-        # Only deep-scan features with extreme sparsity (> 85% nulls)
-        if n_rate > 0.85:
-            # A. Raw Signal (Pearson correlation on available data points)
-            raw_corr = df[col].corr(df[target])
-            if pd.isna(raw_corr): raw_corr = 0.0
-            
-            # B. Missingness Signal (Correlation of the 'Null Mask' itself)
-            null_corr = df[col].isnull().astype(int).corr(df[target])
-            if pd.isna(null_corr): null_corr = 0.0
-            
-            # DROPPING RULE: Both signals must be below the 1% threshold
-            if abs(raw_corr) < 0.01 and abs(null_corr) < 0.01:
-                num_discards.append((col, n_rate, raw_corr, null_corr))
-
-    # --- 3. CATEGORICAL DISCARD LOGIC (Target Encoding with Null-Inclusion) ---
-    print("Evaluating Categoricals via OOF Target Encoding...")
-    cat_cols = df.select_dtypes(include=['object']).columns.tolist()
-    # Pull in semantic labels like addr1/2
-    for sc in ['addr1', 'addr2']:
-        if sc in df.columns and sc not in cat_cols: cat_cols.append(sc)
-    cat_cols = sorted(cat_cols)
-
-    # Prepare temporary DF for TE (Filling NaNs with 'Unknown' to capture their signal)
-    df_cat_filled = df[cat_cols].fillna('Unknown')
-    df_cat_filled[target] = df[target] # RE-ATTACH TARGET FOR GROUPBY
-
-    cat_discards = []
-    cat_keep = []
-
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-
-    for col in cat_cols:
-        n_rate = df[col].isnull().mean()
+        f.write(f"Dataset: {df.shape[0]:,} transactions, {df.shape[1]} columns\n")
+        f.write(f"Fraud rate: {df[target_col].mean():.4f} ({int(df[target_col].sum()):,} fraudulent)\n\n")
         
-        # Only deep-scan sparse categoricals
-        if n_rate > 0.85:
-            te_val = pd.Series(index=df.index, dtype=float)
-            for t_idx, v_idx in kf.split(df):
-                # We group by the 'filled' column so 'Unknown' gets a fraud score
-                mapping = df_cat_filled.iloc[t_idx].groupby(col)[target].mean()
-                te_val.iloc[v_idx] = df_cat_filled.iloc[v_idx][col].map(mapping)
-            
-            # Measure correlation of the encoded fraud probabilities
-            corr = te_val.fillna(df[target].mean()).corr(df[target])
-            if pd.isna(corr): corr = 0.0
-            
-            if abs(corr) < 0.01:
-                cat_discards.append((col, n_rate, corr))
-                continue
+        f.write("-" * 60 + "\n")
+        f.write("V-FEATURES PCA (SCALED)\n")
+        f.write("-" * 60 + "\n")
+        f.write(f"Total V-features: {n_v}\n")
+        f.write(f"Components for 95% variance: {n_95}\n")
+        f.write(f"Components for 99% variance: {n_99}\n\n")
         
-        cat_keep.append(col)
-
-    # --- 4. GENERATE PRODUCTION MANIFEST ---
-    print(f"Writing findings to {report_file}...")
-    with open(report_file, "w") as f:
-        f.write("=== PRODUCTION DATA PREP MANIFEST ===\n")
-        f.write("Copy these exact blocks into your configs/data_prep.yaml\n\n")
-
-        f.write("-" * 50 + "\n")
-        f.write("1. DROP FEATURES\n")
-        f.write("# Discard Logic: Null Rate > 85% AND (Raw Signal < 1% AND Missingness Signal < 1%)\n\n")
+        f.write(f"{'PC':>4} | {'Individual':>12} | {'Cumulative':>12}\n")
+        f.write(f"{'-'*4}-+-{'-'*12}-+-{'-'*12}\n")
+        for i in range(min(100, len(exp_var))):
+            f.write(f"{i+1:4d} | {exp_var[i]*100:11.2f}% | {cum_var[i]*100:11.2f}%\n")
         
-        f.write("  drop_features:\n")
+        f.write(f"\n{'='*60}\n")
+        f.write("RECOMMENDATION\n")
+        f.write(f"{'='*60}\n")
         
-        f.write("    # --- Numerical Discards ---\n")
-        if not num_discards:
-            f.write("    []\n")
+        if n_95 <= 2:
+            f.write("⚠️  WARNING: Only 2 PCs capturing 95% suggests scaling may\n")
+            f.write("    still be failing or V-features are extremely redundant.\n")
         else:
-            for col, n, r_c, n_c in num_discards:
-                f.write(f"    - \"{col}\"  # Null: {n:.1%}, Raw Corr: {r_c:.4f}, Null Corr: {n_c:.4f}\n")
-            
-        f.write("\n    # --- Categorical Discards (Low Signal after TE) ---\n")
-        if not cat_discards:
-            f.write("    []\n")
-        else:
-            for col, n, c in cat_discards:
-                f.write(f"    - \"{col}\"  # Null: {n:.1%}, TE-Corr: {c:.4f}\n")
-
-        f.write("\n" + "-" * 50 + "\n")
-        f.write("2. CATEGORICAL FEATURES\n")
-        f.write("# Includes raw strings and semantic labels (addr1/addr2).\n")
-        f.write("  categorical:\n    columns:\n")
-        for col in cat_keep:
-            f.write(f"      - \"{col}\"\n")
-
-        f.write("\n" + "-" * 50 + "\n")
-        f.write("3. V-FEATURES PCA ANALYSIS\n")
-        f.write(f"# Found {v_count} V-features. Total variance captured:\n")
-        f.write("# PC | Individual % | Cumulative %\n")
-        if pca_stats:
-            for s in pca_stats:
-                f.write(f"# {s['PC']:<2} | {s['Ind']:<12} | {s['Cum']}\n")
-        
-        f.write("\n  reduce_v_features: true\n")
-        f.write("  v_features_pca_dims: 2 # Matches 99% cumulative threshold\n")
-
-    print(f"✅ Analysis complete. found {len(num_discards) + len(cat_discards)} features to drop.")
+            f.write(f"Set v_features_pca_dims: {n_99} in data_prep.yaml\n")
+            f.write(f"This captures 99% variance in {n_99} components (down from {n_v}).\n")
+            f.write(f"\nAlternative: {n_95} components for 95% (more aggressive compression).\n")
+    
+    print(f"Report saved to {report_path}")
+    print(f"\n🔑 KEY RESULT: You need {n_99} PCs for 99% variance (was 2 — that was unscaled garbage)")
 
 if __name__ == "__main__":
-    run_analysis("configs/data_prep.yaml")
+    run_analysis()

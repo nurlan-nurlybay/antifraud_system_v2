@@ -1,112 +1,104 @@
 """
-PyTorch Training Engine.
+PyTorch Training Engine for Antifraud System v2.0.
 
-This module handles the core training loops, evaluation, and Out-Of-Fold (OOF) 
-prediction generation. It utilizes Automatic Mixed Precision (AMP) to maximize 
-RTX 5060 Tensor Core performance.
+This module provides the `FraudTrainer` class, which handles the core training loops, 
+evaluation metrics (PR-AUC), and Out-Of-Fold (OOF) prediction generation.
+It utilizes modern PyTorch 2.x Automatic Mixed Precision (AMP) to maximize 
+Tensor Core performance on RTX 50-series and 40-series architecture.
 """
 
 import torch
-import torch.cuda.amp as amp  # Stable namespace for AMP components
-import structlog
 import numpy as np
-from sklearn.metrics import roc_auc_score
+import structlog
+from src.fd.utils.logging import setup_logger
+from sklearn.metrics import average_precision_score
 from torch.utils.data import DataLoader
 
+setup_logger()
 logger = structlog.get_logger(__name__)
 
 class FraudTrainer:
     """
-    Generic training engine for PyTorch models.
+    High-performance training engine for 143-feature Neural Networks (MLP, LSTM, VAE).
+    Manages state, gradient scaling, metric calculation, and Elastic Net (L1) regularization.
     """
     def __init__(
         self, 
         model: torch.nn.Module, 
         optimizer: torch.optim.Optimizer, 
-        criterion: torch.nn.Module, 
-        device: str = "cuda"
+        criterion: torch.nn.Module,
+        device: str = "cuda",
+        l1_lambda: float = 0.0  # Controls the L1 (Lasso) penalty. 0.0 disables it.
     ):
+        # 1. Setup Hardware & Components
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         self.optimizer = optimizer
         self.criterion = criterion.to(self.device)
-        
-        # Using the standard CUDA GradScaler
-        self.scaler = amp.GradScaler()
+        self.l1_lambda = l1_lambda
 
-    def train_epoch(self, loader: DataLoader) -> float:
-        """Trains the model for one epoch and returns the average loss."""
+    def train_epoch(self, loader) -> float:
+        """
+        Executes one full pass over the training data.
+        """
         self.model.train()
-        total_loss = 0.0
+        epoch_loss = torch.zeros(1, device=self.device)
+        batches_processed = 0
 
         for X_batch, y_batch in loader:
-            X_batch = X_batch.to(self.device, non_blocking=True)
-            y_batch = y_batch.to(self.device, non_blocking=True)
-
             self.optimizer.zero_grad(set_to_none=True)
 
-            # Mixed Precision Context for Tensor Core acceleration
-            with amp.autocast():
-                predictions = self.model(X_batch)
-                loss = self.criterion(predictions, y_batch)
+            logits = self.model(X_batch)
+            loss = self.criterion(logits, y_batch)
 
-            # Scale gradients and backpropagate
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            if self.l1_lambda > 0:
+                l1_penalty = sum(p.abs().sum() for p in self.model.parameters() if p.requires_grad)
+                loss = loss + (self.l1_lambda * l1_penalty)
 
-            total_loss += float(loss.item())
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
 
-        return total_loss / len(loader)
+            epoch_loss += loss.detach()
+            batches_processed += 1
+
+        return (epoch_loss / batches_processed).item() if batches_processed > 0 else 0.0
 
     @torch.no_grad()
-    def evaluate(self, loader: DataLoader) -> tuple[float, float]:
-        """Evaluates the model and returns (Average Loss, ROC-AUC Score)."""
+    def evaluate(self, loader) -> tuple[float, float]:
         self.model.eval()
-        total_loss = 0.0
+        epoch_loss = torch.zeros(1, device=self.device)
         
         all_preds = []
         all_targets = []
 
         for X_batch, y_batch in loader:
-            X_batch = X_batch.to(self.device, non_blocking=True)
-            y_batch = y_batch.to(self.device, non_blocking=True)
+            logits = self.model(X_batch)
+            loss = self.criterion(logits, y_batch)
 
-            with amp.autocast():
-                logits = self.model(X_batch)
-                loss = self.criterion(logits, y_batch)
-
-            total_loss += float(loss.item())
+            epoch_loss += loss.detach()
             
-            # Convert logits to probabilities using Sigmoid for AUC calculation
             probs = torch.sigmoid(logits).cpu().numpy()
             all_preds.extend(probs)
             all_targets.extend(y_batch.cpu().numpy())
 
-        avg_loss = total_loss / len(loader)
+        avg_loss = (epoch_loss / len(loader)).item()
         
-        # Calculate AUC (Explicitly cast to float to satisfy type checkers)
         try:
-            auc = float(roc_auc_score(all_targets, all_preds))
+            auc = float(average_precision_score(all_targets, all_preds))
         except ValueError:
-            auc = 0.5 # Fallback if only one class is present in the batch
+            logger.error("Average Precision calculation failed. Only one class present in targets.")
+            auc = 0.0
 
         return avg_loss, auc
 
     @torch.no_grad()
-    def predict(self, loader: DataLoader) -> np.ndarray:
-        """
-        Generates Out-Of-Fold (OOF) probabilities for the Stacker model.
-        Returns a 1D numpy array of probabilities.
-        """
+    def predict(self, loader) -> np.ndarray:
         self.model.eval()
         all_preds = []
 
         for X_batch, _ in loader:
-            X_batch = X_batch.to(self.device, non_blocking=True)
-            with amp.autocast():
-                logits = self.model(X_batch)
-            
+            logits = self.model(X_batch)
             probs = torch.sigmoid(logits).cpu().numpy()
             all_preds.extend(probs)
 

@@ -90,3 +90,34 @@ So you are sacrificing two precious resources: data and compute time.
 If you are okay with it, yes, it may converge to the optimal weights. If you don’t like that, you still use α, just moderately (4× instead of clumsy 32×), so that it is not utterly forgotten in stage A.
 
 1. The model actually may never converge if you are using modern optimizers like Adam or SGD with momentum. If in the last 50 iterations you largely moved in the opposite direction of the gradient of normal loss, you’ve built up so much momentum that it may just overwhelm the exponential shrinkage of γ.
+
+---
+---
+---
+
+## Training alpha and gamma: Bayesian (Optuna) vs GradDescent (Adam)
+
+Since you initialized alpha and gamma as standard floats in your current code, Optuna is the only way to tune them. If you changed them to nn.Parameter, Adam could technically touch them, but it’s almost always a bad idea.
+Here is why Optuna (probabilistic scanning) is better for these specific values:
+## 1. The "Cheating" Problem
+If you let Adam tune alpha and gamma via gradients, the model will "cheat" to make the loss number smaller without actually getting smarter.
+
+* If the model is struggling, it might realize that decreasing gamma or alpha makes the total loss number drop instantly.
+* The Optimizer thinks it's doing a great job because the loss is lower, but in reality, it just made the "test" easier rather than learning the data better.
+
+## 2. The Non-Convex Landscape
+Adam (Moving Downhill) works best on "smooth" hills (weights). Hyperparameters like gamma often create "jagged" or "flat" landscapes where gradients don't tell you much. Optuna doesn't care about the slope; it just looks at the final validation score and says, "This setting worked better for the overall accuracy."
+## 3. Validation vs. Training
+
+* Adam tunes parameters based on Training Loss.
+* Optuna tunes hyperparameters based on Validation Metrics (like F1-score or PR-AUC).
+* Since you are dealing with fraud imbalance, you care about the F1-score on "unseen" data. Optuna is built exactly for that.
+
+## Summary Recommendation
+Keep your FocalLoss exactly as it is (using floats). Use Optuna to suggest the values:
+
+# Inside your Optuna objective function:gamma = trial.suggest_float("gamma", 0.5, 5.0)alpha = trial.suggest_float("alpha", 0.1, 0.9)criterion = FocalLoss(alpha=alpha, gamma=gamma)
+
+This ensures your model is learning the fraud patterns with Adam, while Optuna is finding the perfect lens (the loss function) for the model to see those patterns through.
+Would you like to see how to define the Optuna trial to search for these two specific values?
+

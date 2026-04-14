@@ -1,59 +1,152 @@
-# Stage A: Data Preprocessing & Hybrid Feature Engineering
-**Project:** Antifraud System v2.2  
-**Dataset:** IEEE-CIS Fraud Detection (Transaction & Identity)
+# Processed Dataset Manifest — Antifraud System v2.0
 
-## 1. Feature Engineering: Added & Dropped Dimensions
-The system transforms the raw 434-column IEEE-CIS dataset into optimized tensors by explicitly adding behavioral signals and removing high-cardinality or redundant noise.
+**Source**: IEEE-CIS Fraud Detection (590,540 raw transactions)
 
-### 1.1 Engineered Features (Added)
-* **Uid (User Identifier):** Synthesized by concatenating `card1-6`, `addr1`, and `P_emaildomain`. This feature is used for chronological sorting and LSTM grouping before being moved to metadata.
-* **Cyclical Time (hour_sin, hour_cos):** Derived from `TransactionDT` to map the 86,400-second day into a circular wave, capturing 24-hour periodic fraud patterns.
-* **Target Encodings (_te):** All 33 categorical columns (e.g., `ProductCD`, `DeviceInfo`) were transformed into scalar likelihoods using 5-fold Bayesian smoothed target encoding.
-* **Binary Missingness Masks (_is_nan):** [Neural/LSTM Path only] 42+ new binary columns added to flag the "Signal of Absence" for critical numerical features like `D`-columns and `dist1`.
-* **Principal Components (V_pca_0, V_pca_1):** [Neural/LSTM Path only] Two linear projections capturing >99% variance of the 339 V-features.
+**Split**: Chronological 90%/10% (Dev / Meta-Validation)
 
-### 1.2 Feature Selection (Dropped)
-* **Metadata Discards:** `TransactionID`, `TransactionDT`, and `Uid` are removed from the feature matrix $X$ to prevent the model from memorizing specific IDs or timestamps.
-* **Raw Categoricals:** All original string/object columns are dropped after being replaced by their respective Target Encoded scalar versions.
-* **V-Feature Redundancy:** [Neural/LSTM Path only] The original 339 V-features are entirely discarded and replaced by the 2 PCA components.
-* **Target Leakage:** `isFraud` is extracted and saved as the target vector $y$.
+**Preprocessor Artifact**: `models/preprocessors/preprocessor.joblib`
 
 ---
 
-## 2. Model-Specific Transformation Paths
-To maximize the mathematical strengths of different model archetypes, the pipeline bifurcates into four distinct normalization and transformation strategies.
+## Dataset Files
 
-### 2.1 Universal Base Logic (All Paths)
-All transaction amounts are normalized using a Log-Transform ($\log(1+x)$) to handle the extreme positive skew and the presence of "Whale" transactions. Categorical encoding is standardized across all versions to ensure feature parity in the Meta-Stacker.
-
-### 2.2 Path A: Neural Transformation (MLP & VAE)
-* **Normalization:** Employs Z-score Standard Scaling (Mean 0, Std 1) for all 141 features. This ensures numerical stability for backpropagation and prevents the "Exploding Gradient" problem.
-* **Dimensionality:** Reduced to 141 features. This includes the 2 PCA V-components and the 42+ missingness masks required to preserve signal in the presence of medians.
-
-### 2.3 Path B: Tree-Based Transformation (XGBoost / CatBoost)
-* **Imputation:** Utilizes "Spatial Splitting" by filling all numerical NaNs with **-999**. This creates a distinct territory in the decision tree manifold for missing data.
-* **Dimensionality:** Retains the high-density 433-feature footprint. Decision trees natively handle the collinearity of the 339 V-features, making PCA unnecessary and potentially harmful to information gain.
-
-### 2.4 Path C: Sequence Transformation (LSTM)
-* **Reshaping:** Data is transformed into Rank-3 Tensors $[N, 5, 141]$. 
-* **Temporal Padding:** Individual user histories are truncated or pre-padded with zeros to reach a fixed depth of 5 timesteps.
-* **Feature Set:** Mirrors the MLP path (141 features) to ensure that behavioral shifts across the 5 steps are captured with standardized gradients.
+| File | X Shape | y Shape | Fraud | Rate | dtype | Size |
+|------|---------|---------|-------|------|-------|------|
+| `X_y_dev_tree.npz` | `(531486, 438)` | `(531486,)` | 18,450 | 3.47% | float32 | 101.4 MB |
+| `X_y_dev_mlp.npz` | `(531486, 195)` | `(531486,)` | 18,450 | 3.47% | float32 | 143.0 MB |
+| `X_y_dev_lstm.npz` | `(531486, 5, 195)` | `(531486,)` | 18,450 | 3.47% | float32 | 666.3 MB |
+| `X_y_meta_val_tree.npz` | `(59054, 438)` | `(59054,)` | 2,213 | 3.75% | float32 | 7.6 MB |
+| `X_y_meta_val_mlp.npz` | `(59054, 195)` | `(59054,)` | 2,213 | 3.75% | float32 | 11.5 MB |
+| `X_y_meta_val_lstm.npz` | `(59054, 5, 195)` | `(59054,)` | 2,213 | 3.75% | float32 | 39.1 MB |
 
 ---
 
-## 3. The "Signal of Absence" (NaN Strategy)
-The system addresses the "Median Signal Killer" problem—where filling missing values with the median makes suspicious, data-poor transactions appear "average."
-* **The Strategy:** For tree models, the -999 constant allows for explicit binary splits on missingness. For neural models, the supplementary binary masks (`_is_nan`) force the network to weight the "fact of missingness" separately from the "imputed value," preserving the behavioral intent behind hidden data fields.
+## Shared Preprocessing (All Datasets)
+
+These steps are applied identically to Dev and Meta-Val data via `DataPreprocessor.clean_base_data()`:
+
+1. **Merge**: Transaction table LEFT JOIN Identity table on `TransactionID`
+2. **User ID Creation**: `Uid` = hash of `[card1, card2, card3, card4, card5, card6, addr1, P_emaildomain]`
+3. **Chronological Sort**: All rows sorted by `TransactionDT` (ascending). This is critical for the Expanding Mean Target Encoder.
+4. **Velocity Feature**: `time_dist_last` = time since user's previous transaction (`groupby(Uid).diff()` on `TransactionDT`). First transaction per user → NaN.
+5. **Rolling Amount Features**:
+   - `amt_rolling_mean`: Rolling 5-transaction mean of `TransactionAmt` per user
+   - `amt_rolling_std`: Rolling 5-transaction standard deviation per user. Detects sudden spending anomalies.
+6. **Categorical Imputation**: All string columns filled with `"Unknown"`
+
+### Expanding Mean Target Encoder (Zero Temporal Leakage)
+
+Replaces each categorical column with a numeric `_te` suffix column.
+
+For transaction *i* with category value *c*:
+
+```
+encoding_i = (cumulative_fraud_sum_of_c_before_i + m * global_mean) / (cumulative_count_of_c_before_i + m)
+```
+
+- **m** = 10 (Bayesian smoothing strength)
+- **First occurrence** of any category → falls back to `global_mean` (the Bayesian prior)
+- **Val/Test sets** are encoded using the *final* cumulative averages from the Dev set (no refit)
+- The original categorical string columns are **dropped** after encoding
+
+### Cyclical Time Features
+
+- `hour_sin`, `hour_cos`: Hour of day (24h cycle) from `TransactionDT`
+- `day_sin`, `day_cos`: Day of week (7-day cycle) from `TransactionDT`
+- Captures that 11:59 PM ↔ 12:01 AM are adjacent, not 24h apart
 
 ---
 
-## 4. Artifact Structure
-The preprocessing pipeline outputs the following compressed `.npz` files, split into a **90% Dev Set** and a **10% Meta-Validation Set**.
+## Tree Features (`X_y_*_tree.npz`)
 
-| Artifact | Purpose | Depth | Feature Width | Fraud Rate |
-| :--- | :--- | :--- | :--- | :--- |
-| `X_y_dev_tree.npz` | Tree Training | 1 (2D) | 433 | 3.47% |
-| `X_y_dev_mlp.npz` | Neural Training | 1 (2D) | 141 | 3.47% |
-| `X_y_dev_lstm.npz` | Sequence Training | 5 (3D) | 141 | 2.69%* |
+Used by: **LightGBM, XGBoost, CatBoost, Random Forest**
 
-*\*Note: The LSTM fraud rate is lower because labels are assigned based only on the latest transaction in a user's 5-step sequence.*
+**Dimensions**: 438 features
+
+### Preprocessing Pipeline
+
+1. Cyclical time encoding (hour + day)
+2. Expanding Mean Target Encoding on all categoricals
+3. **NaN Imputation**: All remaining numeric NaNs filled with `-999`
+   - Trees can learn splits on -999 → the missingness pattern becomes a feature itself
+4. **NO PCA**: V1–V339 kept as raw features (339 columns)
+5. **NO StandardScaler**: Trees are scale-invariant
+
+### Feature Composition
+
+| Group | Count | Description |
+|-------|-------|-------------|
+| V-features (raw) | 339 | Vesta engineered features, kept uncompressed |
+| C-features | 14 | Counting features (C1–C14) |
+| D-features | 15 | Time delta features (D1–D15) |
+| Target Encoded | ~20 | Categorical columns → numeric TE values |
+| Cyclical Time | 4 | hour_sin, hour_cos, day_sin, day_cos |
+| Velocity | 3 | time_dist_last, amt_rolling_mean, amt_rolling_std |
+| Other numeric | ~43 | TransactionAmt, dist1/2, id_* numeric, etc. |
+
+---
+
+## Neural Features (`X_y_*_mlp.npz`)
+
+Used by: **MLP, VAE**
+
+**Dimensions**: 195 features
+
+### Preprocessing Pipeline
+
+1. **NaN Mask Injection**: For every column with missing values, a binary `{col}_is_nan` column is added (1 = missing, 0 = present). This preserves the 'Signal of Absence'.
+2. **Median Imputation**: All numeric NaNs filled with the column median from the Dev set.
+3. Cyclical time encoding (hour + day)
+4. Expanding Mean Target Encoding on all categoricals
+5. **Log Transforms**: `log1p(TransactionAmt)` and `log1p(time_dist_last)` to compress heavy-tailed distributions
+6. **V-Feature Scaling + PCA**: 339 raw V-features → StandardScaler → PCA → **50 principal components** (87.7% cumulative variance)
+7. **Global StandardScaler**: All remaining numeric features scaled to mean=0, var=1
+
+### Key Differences from Tree Features
+
+| Aspect | Trees | Neural (MLP/VAE) |
+|--------|-------|------------------|
+| V-features | 339 raw columns | 50 PCA components |
+| NaN handling | -999 sentinel | Median + binary mask |
+| Scaling | None | StandardScaler (mean=0, var=1) |
+| Amount/Velocity | Raw | log1p transformed |
+
+---
+
+## LSTM Sequence Features (`X_y_*_lstm.npz`)
+
+Used by: **FraudLSTM**
+
+**Dimensions**: `(531486, 5, 195)` = (transactions, seq_len, features)
+
+### Preprocessing Pipeline
+
+Same as MLP/VAE (steps 1–7 above), then:
+
+8. **Transaction-Centric Rolling Windows**: For every transaction at index *i*:
+   - Identify the user (`Uid`)
+   - Retrieve up to `seq_len=5` of that user's past transactions (including *i*)
+   - **Causal zero-padding**: If user has < 5 transactions, pad at the BEGINNING
+   - Example (user's 2nd transaction): `[0, 0, 0, T1, T2]`
+
+### Key Properties
+
+- **1:1 alignment**: Exactly the same number of rows as Tree/MLP datasets (no user-level collapse)
+- **No future leakage**: Transaction *i*'s window only contains transactions ≤ *i*
+- **Every transaction gets a prediction**: Even a user's first-ever swipe (fully zero-padded)
+- **Same feature space as MLP**: Each timestep has the same 50 PCA + engineered features
+
+---
+
+## Saved Preprocessing Artifacts
+
+`models/preprocessors/preprocessor.joblib` contains:
+
+| Object | Purpose |
+|--------|--------|
+| `scaler` (StandardScaler) | Global feature scaling (mean=0, var=1) |
+| `v_scaler` (StandardScaler) | V-feature scaling applied BEFORE PCA |
+| `pca` (PCA, random_state=42) | 339 V-features → 50 principal components |
+| `te_encoder` (ExpandingMeanEncoder) | Final cumulative target encoding mappings |
+| `numerical_medians` (dict) | Per-column medians for NaN imputation |
+| `nan_mask_columns` (list) | Columns that require NaN binary masks |

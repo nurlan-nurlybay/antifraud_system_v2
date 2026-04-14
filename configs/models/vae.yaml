@@ -1,21 +1,15 @@
 model:
-  name: "FraudVAE"
-  type: "pytorch"
-  input_dim: 141
-  latent_dim: 16  # Compressing 141 features down to 16 core signals
-  hidden_dims: [64, 32] 
-
+  name: FraudVAE
+  type: pytorch
+  input_dim: 195
+  latent_dim: 16
+  hidden_dims:
+  - 128
+  dropout: 0.1374
 training:
   batch_size: 1024
   epochs: 50
-  learning_rate: 0.0005
-  kld_weight: 0.01  # Weight for KL-Divergence term (beta-VAE)
+  learning_rate: 0.00289029
+  weight_decay: 0.0004904
+  kld_weight: 0.00012907
   early_stopping_patience: 10
-
-loss_params:
-  type: "focal"
-  focal:
-    alpha: 0.8
-    gamma: 2.0
-  wbce:
-    pos_weight: 32.0

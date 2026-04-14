@@ -52,7 +52,7 @@ def run_data_prep(cfg_path: str):
 
     ids_map = {
         "dev": temp_df.iloc[:dev_idx][id_col].values,
-        "meta_val": temp_df.iloc[dev_idx:][id_col].values
+        "meta_test": temp_df.iloc[dev_idx:][id_col].values
     }
     
     del temp_df
@@ -60,7 +60,7 @@ def run_data_prep(cfg_path: str):
 
     logger.info("data_split_calculated", 
                 dev_size=len(ids_map['dev']), 
-                meta_val_size=len(ids_map['meta_val']))
+                meta_test_size=len(ids_map['meta_test']))
 
     pp = DataPreprocessor(cfg)
 
@@ -77,7 +77,7 @@ def run_data_prep(cfg_path: str):
         clear_memory()
         
         # Base Clean Phase (Creates Uids, handles Categorical strings)
-        df_clean = pp.clean_base_data(df_clean, is_train=is_train)
+        df_clean = pp.clean_base_data(df_clean)
         
         # Phase 1: Export Tree Features
         logger.info("generating_features", split=name, type="tree")
@@ -100,6 +100,7 @@ def run_data_prep(cfg_path: str):
         del X_lstm, y_lstm, df_clean
         clear_memory()
 
+    pp.save_artifacts("models/preprocessors")
     logger.info("pipeline_completed", status="success")
 
 if __name__ == "__main__":

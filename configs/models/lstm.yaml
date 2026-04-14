@@ -1,23 +1,22 @@
 model:
-  name: "FraudLSTM"
-  type: "pytorch"
-  input_dim: 141  # Features per timestep (from metadata.yaml)
-  hidden_dim: 128
+  name: FraudLSTM
+  type: pytorch
+  input_dim: 195
+  hidden_dim: 256
   num_layers: 2
-  dropout: 0.3
+  dropout: 0.4691
   bidirectional: false
-
 training:
-  batch_size: 512  # Smaller than MLP due to 3D sequence memory
+  batch_size: 1024
   epochs: 50
-  learning_rate: 0.001
-  weight_decay: 1e-5
+  learning_rate: 0.00019717
+  weight_decay: 1.1e-06
+  l1_lambda: 5.7e-07
   early_stopping_patience: 8
-
 loss_params:
-  type: "focal"
+  type: focal
   focal:
-    alpha: 0.8
-    gamma: 2.0
+    alpha: 0.9436
+    gamma: 2.7973
   wbce:
     pos_weight: 32.0

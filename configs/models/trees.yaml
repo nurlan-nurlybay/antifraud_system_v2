@@ -1,33 +1,44 @@
 xgboost:
   enabled: true
-  # Note: Uses X_y_dev_tree.npz (433 features)
   params:
     n_estimators: 200
-    max_depth: 6
-    learning_rate: 0.05
-    subsample: 0.8
-    scale_pos_weight: 32.0  # XGBoost's native equivalent to WBCE
-    pred_leaf: true 
-
+    max_depth: 12
+    learning_rate: 0.074439
+    subsample: 0.945584
+    scale_pos_weight: 32.0
+    pred_leaf: true
+    colsample_bytree: 0.584999
+    min_child_weight: 1
 lightgbm:
   enabled: true
   params:
     n_estimators: 200
-    num_leaves: 31
-    learning_rate: 0.05
-    boosting_type: "gbdt"
+    num_leaves: 300
+    learning_rate: 0.056198
+    subsample: 0.970381
+    boosting_type: gbdt
     scale_pos_weight: 32.0
     pred_leaf: true
-
+    colsample_bytree: 0.655408
+    min_data_in_leaf: 91
 random_forest:
   enabled: true
   params:
     n_estimators: 100
-    max_depth: 10
+    max_depth: 12
     n_jobs: -1
-    class_weight: "balanced"
+    class_weight: balanced
     return_leaves: true
-
+    max_features: 0.372545
+    min_samples_leaf: 9
+catboost:
+  enabled: true
+  params:
+    iterations: 200
+    depth: 10
+    learning_rate: 0.060791
+    scale_pos_weight: 32.0
+    thread_count: -1
+    l2_leaf_reg: 7.899236
 embeddings:
-  # Dimension of the vector representing a single leaf node in the Stacker
   leaf_embedding_dim: 4

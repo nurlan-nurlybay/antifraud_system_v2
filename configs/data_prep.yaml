@@ -74,7 +74,7 @@ features:
       - "id_38"
 
   reduce_v_features: true
-  v_features_pca_dims: 2 # Locked: Captures 99.34% Variance based on Scree Plot
+  v_features_pca_dims: 50 # 87.7% variance (trees see raw 339 V-features directly)
   
   # Imputation handles dynamically in preprocessing.py: 
   # Trees = -999, Neural = Median + Binary Mask

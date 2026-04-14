@@ -1,0 +1,24 @@
+meta_model:
+  type: LogisticRegression
+  best_params:
+    C: 99.335092
+    penalty: elasticnet
+    l1_ratio: 0.006037
+  base_model_order:
+  - lightgbm
+  - xgboost
+  - catboost
+  - mlp
+  - vae
+  - lstm
+  - random_forest
+  coefficients:
+    lightgbm: 4.712225
+    xgboost: 2.239205
+    catboost: 3.141874
+    mlp: 2.795895
+    vae: 0.957976
+    lstm: 2.432643
+    random_forest: -0.769979
+  intercept: -6.99183
+  meta_val_pr_auc: 0.4774
