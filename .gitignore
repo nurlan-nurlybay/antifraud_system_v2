@@ -224,3 +224,4 @@ data/processed/*
 !data/processed/*.py
 *.egg-info/
 *.csv
+!reports/ablation/ablation_results.csv
